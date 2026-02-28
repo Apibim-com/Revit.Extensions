@@ -1,6 +1,6 @@
 using System.Threading.Tasks;
 
-namespace Apibim.Revit.Extensions;
+namespace Revit.Extensions;
 
 /// <summary>
 /// Helpers for executing asynchronous work synchronously inside the Revit event loop,

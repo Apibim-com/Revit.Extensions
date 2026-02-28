@@ -1,7 +1,7 @@
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 
-namespace Apibim.Revit.Extensions;
+namespace Revit.Extensions;
 
 /// <summary>
 /// Extension methods for working with Revit elements and collectors.

@@ -12,7 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\source\Apibim.Revit.Extensions.csproj" />
+    <ProjectReference Include="..\source\Revit.Extensions.csproj" />
   </ItemGroup>
 
   <ItemGroup>

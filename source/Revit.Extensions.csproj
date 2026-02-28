@@ -1,14 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <AssemblyName>Apibim.Revit.Extensions</AssemblyName>
-    <RootNamespace>Apibim.Revit.Extensions</RootNamespace>
+    <AssemblyName>Revit.Extensions</AssemblyName>
+    <RootNamespace>Revit.Extensions</RootNamespace>
     <Version>$(RevitVersion).0.1</Version>
 
     <!-- NuGet metadata -->
-    <PackageId>Apibim.Revit.Extensions</PackageId>
-    <Authors>Apibim</Authors>
-    <Company>Apibim.com</Company>
+    <PackageId>Revit.Extensions</PackageId>
+    <Authors>Apibim SpA</Authors>
+    <Company>com</Company>
     <Description>Extension methods for Autodesk Revit API</Description>
     <RepositoryUrl>https://github.com/apibim/Revit.Extensions</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -16,8 +16,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3"
-        Condition="'$(TargetFramework)' != 'net8.0-windows'" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" Condition="'$(TargetFramework)' != 'net8.0-windows'" />
   </ItemGroup>
 
 </Project>
