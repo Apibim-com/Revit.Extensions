@@ -12,7 +12,7 @@ Revit.Extensions/
 ├── .github/workflows/
 │   ├── ci.yml          ← Build + test on every push / PR
 │   └── cd.yml          ← Pack + publish NuGet on tag v*.*.*
-├── source/
+├── Revit.Extensions/
 │       ├── Revit.Extensions.csproj
 │       └── Extensions/
 │           ├── ElementExtensions.cs
@@ -20,7 +20,7 @@ Revit.Extensions/
 │           ├── PointExtensions.cs
 │           ├── DocumentExtensions.cs
 │           └── AsyncTasksExecutor.cs
-├── tests/
+├── Revit.Extensions.Tests/
 │       ├── Revit.Extensions.Tests.csproj
 │       └── Extensions/
 │           ├── GeometryExtensionsTests.cs
@@ -85,10 +85,10 @@ Example in `PointExtensions.cs`:
 
 ## Adding new extensions
 
-1. Create `source/Extensions/MyExtensions.cs`
+1. Create `Revit.Extensions/Extensions/MyExtensions.cs`
 2. Use `namespace Revit.Extensions;`
 3. Mark class `public static`
-4. Add unit tests in `tests/Extensions/MyExtensionsTests.cs`
+4. Add unit tests in `Revit.Extensions.Tests/Extensions/MyExtensionsTests.cs`
 
 ## Notes
 

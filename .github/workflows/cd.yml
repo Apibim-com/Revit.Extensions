@@ -24,13 +24,13 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore source/Revit.Extensions.csproj -p:Configuration=${{ matrix.configuration }}
+        run: dotnet restore Revit.Extensions/Revit.Extensions.csproj -p:Configuration=${{ matrix.configuration }}
 
       - name: Build
-        run: dotnet build source/Revit.Extensions.csproj -p:Configuration=${{ matrix.configuration }} --no-restore
+        run: dotnet build Revit.Extensions/Revit.Extensions.csproj -p:Configuration=${{ matrix.configuration }} --no-restore
 
       - name: Pack
-        run: dotnet pack source/Revit.Extensions.csproj -p:Configuration=${{ matrix.configuration }} --no-build --output ./nupkgs
+        run: dotnet pack Revit.Extensions/Revit.Extensions.csproj -p:Configuration=${{ matrix.configuration }} --no-build --output ./nupkgs
 
       - name: Push to NuGet
         run: dotnet nuget push "./nupkgs/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
