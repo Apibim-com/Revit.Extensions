@@ -25,10 +25,10 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj --configuration ${{ matrix.configuration }}
+        run: dotnet restore source/Apibim.Revit.Extensions.csproj -p:Configuration=${{ matrix.configuration }}
 
       - name: Build
-        run: dotnet build source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj --configuration ${{ matrix.configuration }} --no-restore
+        run: dotnet build source/Apibim.Revit.Extensions.csproj -p:Configuration=${{ matrix.configuration }} --no-restore
 
   test:
     runs-on: windows-latest
@@ -44,10 +44,10 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore tests/Apibim.Revit.Extensions.Tests/Apibim.Revit.Extensions.Tests.csproj --configuration R2025
+        run: dotnet restore tests/Apibim.Revit.Extensions.Tests.csproj -p:Configuration=R2025
 
       - name: Test
-        run: dotnet test tests/Apibim.Revit.Extensions.Tests/Apibim.Revit.Extensions.Tests.csproj --configuration R2025 --no-restore --logger "trx;LogFileName=test-results.trx"
+        run: dotnet test tests/Apibim.Revit.Extensions.Tests.csproj -p:Configuration=R2025 --no-restore --logger "trx;LogFileName=test-results.trx"
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
