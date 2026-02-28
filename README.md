@@ -1,9 +1,14 @@
+<div align="center">
+  <img src="Revit.Extensions/icon.png" alt="Revit.Extensions" width="120" />
+
 # Revit.Extensions
 
 [![CI](https://github.com/apibim/Revit.Extensions/actions/workflows/ci.yml/badge.svg)](https://github.com/apibim/Revit.Extensions/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/Revit.Extensions?color=blue)](https://www.nuget.org/packages/Revit.Extensions)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/Revit.Extensions)](https://www.nuget.org/packages/Revit.Extensions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+</div>
 
 A collection of extension methods for the **Autodesk Revit API**, designed to reduce boilerplate and make Revit add-in development more expressive. Supports **Revit 2020 – 2027**.
 
