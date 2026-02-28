@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        configuration: [R2021, R2022, R2023, R2024, R2025, R2026]
+        configuration: [R2020, R2021, R2022, R2023, R2024, R2025, R2026]
 
     steps:
       - name: Checkout
@@ -21,9 +21,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |
-            8.0.x
-            4.8.x
+          dotnet-version: 8.0.x
 
       - name: Restore
         run: dotnet restore source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj -c ${{ matrix.configuration }}

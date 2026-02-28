@@ -1,10 +1,14 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
     <IsPackable>false</IsPackable>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!-- FluentAssertions (net47 build) references System.Net.Http 4.2.0.0 while the
+       .NET Framework 4.7 inbox assembly is 4.0.0.0; harmless at runtime since
+       tests only execute under R2025/net8.0. -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net47' Or '$(TargetFramework)' == 'net48'">
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

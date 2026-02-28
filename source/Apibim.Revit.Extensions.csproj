@@ -15,4 +15,9 @@
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3"
+        Condition="'$(TargetFramework)' != 'net8.0-windows'" />
+  </ItemGroup>
+
 </Project>
