@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [R2021, R2022, R2023, R2024, R2025, R2026]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            4.8.x
+
+      - name: Restore
+        run: dotnet restore source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj -c ${{ matrix.configuration }}
+
+      - name: Build
+        run: dotnet build source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj -c ${{ matrix.configuration }} --no-restore
+
+  test:
+    runs-on: windows-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore tests/Apibim.Revit.Extensions.Tests/Apibim.Revit.Extensions.Tests.csproj -c R2025
+
+      - name: Test
+        run: dotnet test tests/Apibim.Revit.Extensions.Tests/Apibim.Revit.Extensions.Tests.csproj -c R2025 --no-restore --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: "**/TestResults/*.trx"

@@ -1,0 +1,38 @@
+name: CD
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  pack-and-publish:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [R2021, R2022, R2023, R2024, R2025, R2026]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            4.8.x
+
+      - name: Restore
+        run: dotnet restore source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj -c ${{ matrix.configuration }}
+
+      - name: Build
+        run: dotnet build source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj -c ${{ matrix.configuration }} --no-restore
+
+      - name: Pack
+        run: dotnet pack source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj -c ${{ matrix.configuration }} --no-build --output ./nupkgs
+
+      - name: Push to NuGet
+        run: dotnet nuget push "./nupkgs/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
