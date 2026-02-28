@@ -2,7 +2,7 @@ using Autodesk.Revit.DB;
 using FluentAssertions;
 using Xunit;
 
-namespace Apibim.Revit.Extensions.Tests;
+namespace Revit.Extensions.Tests;
 
 /// <summary>
 /// Tests for <see cref="GeometryExtensions"/>.

@@ -1,14 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
-    <!-- Определение всех конфигураций Revit -->
     <PropertyGroup>
-        <Configurations>R2019;R2020;R2021;R2022;R2023;R2024;R2025;R2026;R2027</Configurations>
+        <Configurations>R2020;R2021;R2022;R2023;R2024;R2025;R2026;R2027</Configurations>
         <Platforms>AnyCPU</Platforms>
-    </PropertyGroup>
-    <!-- Определение версии Revit и TargetFramework -->
-    <PropertyGroup Condition="'$(Configuration)' == 'R2019'">
-        <RevitVersion>2019</RevitVersion>
-        <TargetFramework>net47</TargetFramework>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Configuration)' == 'R2020'">
         <RevitVersion>2020</RevitVersion>
@@ -43,13 +37,11 @@
         <TargetFramework>net8.0-windows</TargetFramework>
     </PropertyGroup>
 
-    <!-- OutputPath и DefineConstants -->
     <PropertyGroup Condition="'$(RevitVersion)' != ''">
         <OutputPath>bin\$(Configuration)\</OutputPath>
         <DefineConstants>DEBUG;$(Configuration);REVIT_$(RevitVersion)</DefineConstants>
     </PropertyGroup>
 
-    <!-- Общие свойства -->
     <PropertyGroup>
         <PlatformTarget>x64</PlatformTarget>
         <LangVersion>default</LangVersion>
@@ -65,14 +57,9 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference
-                Condition="'$(Configuration)' == 'R$(RevitVersion)'"
-                Include="Revit_All_Main_Versions_API_x64"
-                Version="$(RevitVersion).*"
-                IncludeAssets="build; compile"/>
+        <PackageReference Condition="'$(Configuration)' == 'R$(RevitVersion)'" Include="Revit_All_Main_Versions_API_x64" Version="$(RevitVersion).*" IncludeAssets="build; compile"/>
     </ItemGroup>
 
-    <!-- Общие ссылки .NET -->
     <ItemGroup>
         <Reference Include="PresentationCore"/>
         <Reference Include="PresentationFramework"/>

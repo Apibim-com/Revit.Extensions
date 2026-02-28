@@ -1,6 +1,6 @@
 using Autodesk.Revit.DB;
 
-namespace Apibim.Revit.Extensions;
+namespace Revit.Extensions;
 
 /// <summary>
 /// Extension methods for <see cref="Document"/>.

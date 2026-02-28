@@ -2,39 +2,23 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
-  build:
+  build-and-test:
+    name: Revit ${{ matrix.revit }}
     runs-on: windows-latest
+
+    permissions:
+      checks: write
+      contents: read
 
     strategy:
       fail-fast: false
       matrix:
-        configuration: [R2021, R2022, R2023, R2024, R2025, R2026]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: |
-            8.0.x
-            4.8.x
-
-      - name: Restore
-        run: dotnet restore source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj -c ${{ matrix.configuration }}
-
-      - name: Build
-        run: dotnet build source/Apibim.Revit.Extensions/Apibim.Revit.Extensions.csproj -c ${{ matrix.configuration }} --no-restore
-
-  test:
-    runs-on: windows-latest
-    needs: build
+        revit: [2020, 2021, 2022, 2023, 2024, 2025, 2026]
 
     steps:
       - name: Checkout
@@ -46,14 +30,29 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore tests/Apibim.Revit.Extensions.Tests/Apibim.Revit.Extensions.Tests.csproj -c R2025
+        run: dotnet restore Revit.Extensions.Tests/Revit.Extensions.Tests.csproj -p:Configuration=R${{ matrix.revit }}
 
-      - name: Test
-        run: dotnet test tests/Apibim.Revit.Extensions.Tests/Apibim.Revit.Extensions.Tests.csproj -c R2025 --no-restore --logger "trx;LogFileName=test-results.trx"
+      - name: Build
+        run: dotnet build Revit.Extensions.Tests/Revit.Extensions.Tests.csproj -p:Configuration=R${{ matrix.revit }} --no-restore
 
-      - name: Upload test results
+      - name: Run tests
+        run: >
+          dotnet test "Revit.Extensions.Tests/bin/R${{ matrix.revit }}/Revit.Extensions.Tests.dll"
+          --logger "trx;LogFileName=results.trx"
+          --results-directory "${{ github.workspace }}/TestResults/${{ matrix.revit }}"
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Tests – Revit ${{ matrix.revit }}
+          path: "TestResults/${{ matrix.revit }}/results.trx"
+          reporter: dotnet-trx
+
+      - name: Upload test artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results
-          path: "**/TestResults/*.trx"
+          name: test-results-${{ matrix.revit }}
+          path: "TestResults/${{ matrix.revit }}/results.trx"
+          if-no-files-found: warn
