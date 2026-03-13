@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="Revit.Extensions/icon-large.png" alt="Revit.Extensions" width="120" />
+  <img src="Revit.Extensions/icon-large.png" alt="Revit.Extensions" />
 
 # Revit.Extensions
 

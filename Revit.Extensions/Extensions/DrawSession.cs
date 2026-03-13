@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.DirectContext3D;
 using Autodesk.Revit.DB.ExternalService;
@@ -116,17 +113,17 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     public ExternalServiceId GetServiceId() =>
         ExternalServices.BuiltInExternalServices.DirectContext3DService;
 
-    public string GetName()        => "DrawSession";
+    public string GetName() => "DrawSession";
     public string GetDescription() => "Revit.Extensions transient geometry renderer";
-    public string GetVendorId()    => "Revit.Extensions";
+    public string GetVendorId() => "Revit.Extensions";
 
     public string GetApplicationId() => "Revit.Extensions.DrawSession";
-    public string GetSourceId()      => _serverId.ToString();
-    public bool UsesHandles()      => false;
+    public string GetSourceId() => _serverId.ToString();
+    public bool UsesHandles() => false;
 
-    public bool CanExecute(View view)           => !_disposed && _lines.Count > 0 && view is View3D;
+    public bool CanExecute(View view) => !_disposed && _lines.Count > 0 && view is View3D;
     public bool UseInTransparentPass(View view) => false;
-    public Outline? GetBoundingBox(View view)   => null;
+    public Outline? GetBoundingBox(View view) => null;
 
     public void RenderScene(View view, DisplayStyle displayStyle)
     {
@@ -189,7 +186,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
 #if REVIT_2024 || REVIT_2023 || REVIT_2022 || REVIT_2021 || REVIT_2020
         foreach (var item in groups)
-        { 
+        {
             var key = item.Key;
             var lines = item.Value;
 #else
@@ -197,9 +194,9 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         {
 #endif
 
-            int nVerts  = lines.Count * 2;
-            int nPrims  = lines.Count;
-            int ibSize  = nPrims * IndexLine.GetSizeInShortInts();
+            int nVerts = lines.Count * 2;
+            int nPrims = lines.Count;
+            int ibSize = nPrims * IndexLine.GetSizeInShortInts();
 
             var vb = new VertexBuffer(nVerts * VertexPosition.GetSizeInFloats());
             vb.Map(nVerts * VertexPosition.GetSizeInFloats());
