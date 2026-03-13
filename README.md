@@ -136,8 +136,6 @@ Contributions are welcome! Please open an issue or submit a pull request.
 3. Add your extension in `Revit.Extensions/Extensions/` with a corresponding test in `tests/Extensions/`
 4. Open a pull request against `main`
 
-See [CLAUDE.md](CLAUDE.md) for build commands and project conventions.
-
 ---
 
 ## License
