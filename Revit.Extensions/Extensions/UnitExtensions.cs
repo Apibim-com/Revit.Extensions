@@ -1,3 +1,5 @@
+using System;
+
 namespace Revit.Extensions;
 
 /// <summary>
@@ -5,12 +7,20 @@ namespace Revit.Extensions;
 /// </summary>
 public static class UnitExtensions
 {
-    private const double MmPerInch = 25.4;
-    private const double MmPerMeter = 1000.0;
+    /// <summary>Millimeters per foot (304.8 = 12 inches × 25.4 mm/inch).</summary>
+    private const double MmPerFoot = 304.8;
 
-    public static double MillimetersToInches(this double mm) => mm / MmPerInch;
-    public static double InchesToMillimeters(this double inches) => inches * MmPerInch;
+    /// <summary>Converts Revit internal units (feet) to millimeters.</summary>
+    public static double FeetToMillimeters(this double feet) => feet * MmPerFoot;
 
-    public static double MetersToInches(this double meters) => meters * MmPerMeter / MmPerInch;
-    public static double InchesToMeters(this double inches) => inches * MmPerInch / MmPerMeter;
+    /// <summary>Converts millimeters to Revit internal units (feet).</summary>
+    public static double MillimetersToFeet(this double mm) => mm / MmPerFoot;
+
+    private const double DefaultTolerance = 1e-9;
+
+    public static bool IsZero(this double a, double tolerance = DefaultTolerance) =>
+        Math.Abs(a) < tolerance;
+
+    public static bool IsEqual(this double a, double b, double tolerance = DefaultTolerance) =>
+        Math.Abs(a - b) < tolerance;
 }
