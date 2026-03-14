@@ -185,6 +185,122 @@ public class GeometryExtensionsTests
     }
 
     // -------------------------------------------------------------------------
+    // Contains (point)
+    // -------------------------------------------------------------------------
+
+    [Fact(Skip = RevitRequired)]
+    public void Contains_PointInsideBox_ReturnsTrue()
+    {
+        var bbox = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(2, 2, 2) };
+        bbox.Contains(new XYZ(1, 1, 1)).Should().BeTrue();
+    }
+
+    [Fact(Skip = RevitRequired)]
+    public void Contains_PointOnBoundary_ReturnsTrue()
+    {
+        var bbox = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(2, 2, 2) };
+        bbox.Contains(new XYZ(0, 0, 0)).Should().BeTrue();
+        bbox.Contains(new XYZ(2, 2, 2)).Should().BeTrue();
+    }
+
+    [Fact(Skip = RevitRequired)]
+    public void Contains_PointOutsideBox_ReturnsFalse()
+    {
+        var bbox = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(2, 2, 2) };
+        bbox.Contains(new XYZ(3, 1, 1)).Should().BeFalse();
+    }
+
+    // -------------------------------------------------------------------------
+    // Contains (box)
+    // -------------------------------------------------------------------------
+
+    [Fact(Skip = RevitRequired)]
+    public void Contains_InnerBoxFullyInside_ReturnsTrue()
+    {
+        var outer = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(4, 4, 4) };
+        var inner = new BoundingBoxXYZ { Min = new XYZ(1, 1, 1), Max = new XYZ(3, 3, 3) };
+        outer.Contains(inner).Should().BeTrue();
+    }
+
+    [Fact(Skip = RevitRequired)]
+    public void Contains_BoxPartiallyOutside_ReturnsFalse()
+    {
+        var outer = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(2, 2, 2) };
+        var inner = new BoundingBoxXYZ { Min = new XYZ(1, 1, 1), Max = new XYZ(3, 3, 3) };
+        outer.Contains(inner).Should().BeFalse();
+    }
+
+    // -------------------------------------------------------------------------
+    // ComputeCentroid
+    // -------------------------------------------------------------------------
+
+    [Fact(Skip = RevitRequired)]
+    public void ComputeCentroid_SymmetricBox_ReturnsCentre()
+    {
+        var bbox = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(4, 6, 8) };
+        var c = bbox.ComputeCentroid();
+        c.X.Should().BeApproximately(2, 1e-9);
+        c.Y.Should().BeApproximately(3, 1e-9);
+        c.Z.Should().BeApproximately(4, 1e-9);
+    }
+
+    // -------------------------------------------------------------------------
+    // ComputeVolume
+    // -------------------------------------------------------------------------
+
+    [Fact(Skip = RevitRequired)]
+    public void ComputeVolume_UnitBox_Returns1()
+    {
+        var bbox = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(1, 1, 1) };
+        bbox.ComputeVolume().Should().BeApproximately(1.0, 1e-9);
+    }
+
+    [Fact(Skip = RevitRequired)]
+    public void ComputeVolume_DegenerateBox_Returns0()
+    {
+        var bbox = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(0, 1, 1) };
+        bbox.ComputeVolume().Should().Be(0);
+    }
+
+    [Fact(Skip = RevitRequired)]
+    public void ComputeVolume_ArbitraryBox_ReturnsCorrectVolume()
+    {
+        var bbox = new BoundingBoxXYZ { Min = new XYZ(1, 2, 3), Max = new XYZ(4, 6, 8) };
+        bbox.ComputeVolume().Should().BeApproximately(60.0, 1e-9);
+    }
+
+    // -------------------------------------------------------------------------
+    // Intersects (with tolerance)
+    // -------------------------------------------------------------------------
+
+    [Fact(Skip = RevitRequired)]
+    public void Intersects_WithTolerance_BoxesJustOutOfRangeButWithinTolerance_ReturnsTrue()
+    {
+        var a = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(1, 1, 1) };
+        var b = new BoundingBoxXYZ { Min = new XYZ(1.5, 0, 0), Max = new XYZ(3, 1, 1) };
+        a.Intersects(b, tolerance: 1.0).Should().BeTrue();
+        a.Intersects(b, tolerance: 0.1).Should().BeFalse();
+    }
+
+    // -------------------------------------------------------------------------
+    // Combine
+    // -------------------------------------------------------------------------
+
+    [Fact(Skip = RevitRequired)]
+    public void Combine_TwoBoxes_ReturnsEnclosingBox()
+    {
+        var a = new BoundingBoxXYZ { Min = new XYZ(0, 0, 0), Max = new XYZ(1, 1, 1) };
+        var b = new BoundingBoxXYZ { Min = new XYZ(-1, 2, 0), Max = new XYZ(3, 3, 5) };
+        var result = a.Combine(b);
+        result.Min.X.Should().BeApproximately(-1, 1e-9);
+        result.Min.Y.Should().BeApproximately(0, 1e-9);
+        result.Min.Z.Should().BeApproximately(0, 1e-9);
+        result.Max.X.Should().BeApproximately(3, 1e-9);
+        result.Max.Y.Should().BeApproximately(3, 1e-9);
+        result.Max.Z.Should().BeApproximately(5, 1e-9);
+    }
+
+    // -------------------------------------------------------------------------
     // Intersects
     // -------------------------------------------------------------------------
 

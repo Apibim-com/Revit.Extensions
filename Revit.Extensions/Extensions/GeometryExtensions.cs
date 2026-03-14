@@ -1,5 +1,3 @@
-using System.Collections.Generic;
-using System.Linq;
 using Autodesk.Revit.DB;
 
 namespace Revit.Extensions;
@@ -11,6 +9,9 @@ public static class GeometryExtensions
 {
     /// <summary>
     /// Converts an <see cref="XYZ"/> point to a value tuple <c>(X, Y, Z)</c>.
+    /// Use this to pass coordinate data across a Revit API boundary — the returned tuple
+    /// carries no dependency on <c>RevitAPI.dll</c>, so it can be consumed by business logic,
+    /// serialisation code, or unit tests that run without a live Revit process.
     /// </summary>
     public static (double X, double Y, double Z) ToVector(this XYZ point)
     {
@@ -62,8 +63,7 @@ public static class GeometryExtensions
     /// <summary>
     /// Returns the midpoint between <paramref name="point"/> and <paramref name="other"/>.
     /// </summary>
-    public static XYZ GetMidpoint(this XYZ point, XYZ other) =>
-        (point + other) / 2;
+    public static XYZ GetMidpoint(this XYZ point, XYZ other) => (point + other) / 2;
 
     /// <summary>
     /// Builds a list of <see cref="Line"/> segments connecting consecutive
@@ -81,7 +81,7 @@ public static class GeometryExtensions
         for (int i = 0; i < segmentCount; i++)
         {
             XYZ from = pts[i];
-            XYZ to   = i == segmentCount - 1 ? pts[0] : pts[i + 1];
+            XYZ to = i == segmentCount - 1 ? pts[0] : pts[i + 1];
             lines.Add(Line.CreateBound(from, to));
         }
 
@@ -192,6 +192,74 @@ public static class GeometryExtensions
         first.Min.Z <= second.Max.Z && first.Max.Z >= second.Min.Z;
 
     /// <summary>
+    /// Returns <c>true</c> when the two axis-aligned bounding boxes overlap in all three axes,
+    /// expanding each box by <paramref name="tolerance"/> on every side before the check.
+    /// </summary>
+    public static bool Intersects(this BoundingBoxXYZ first, BoundingBoxXYZ second, double tolerance) =>
+        first is not null && second is not null &&
+        first.Min.X - tolerance <= second.Max.X + tolerance && first.Max.X + tolerance >= second.Min.X - tolerance &&
+        first.Min.Y - tolerance <= second.Max.Y + tolerance && first.Max.Y + tolerance >= second.Min.Y - tolerance &&
+        first.Min.Z - tolerance <= second.Max.Z + tolerance && first.Max.Z + tolerance >= second.Min.Z - tolerance;
+
+    /// <summary>
+    /// Returns the smallest axis-aligned bounding box that encloses both <paramref name="first"/>
+    /// and <paramref name="second"/>.
+    /// </summary>
+    public static BoundingBoxXYZ Combine(this BoundingBoxXYZ first, BoundingBoxXYZ second) =>
+        new()
+        {
+            Min = new XYZ(
+                Math.Min(first.Min.X, second.Min.X),
+                Math.Min(first.Min.Y, second.Min.Y),
+                Math.Min(first.Min.Z, second.Min.Z)),
+            Max = new XYZ(
+                Math.Max(first.Max.X, second.Max.X),
+                Math.Max(first.Max.Y, second.Max.Y),
+                Math.Max(first.Max.Z, second.Max.Z)),
+        };
+
+    /// <summary>
+    /// Returns <c>true</c> when <paramref name="point"/> lies inside or on the boundary
+    /// of <paramref name="bbox"/>.
+    /// </summary>
+    public static bool Contains(this BoundingBoxXYZ bbox, XYZ point) =>
+        bbox is not null && point is not null &&
+        point.X >= bbox.Min.X && point.X <= bbox.Max.X &&
+        point.Y >= bbox.Min.Y && point.Y <= bbox.Max.Y &&
+        point.Z >= bbox.Min.Z && point.Z <= bbox.Max.Z;
+
+    /// <summary>
+    /// Returns <c>true</c> when <paramref name="other"/> is fully enclosed within
+    /// <paramref name="bbox"/>.
+    /// </summary>
+    public static bool Contains(this BoundingBoxXYZ bbox, BoundingBoxXYZ other) =>
+        bbox is not null && other is not null &&
+        other.Min.X >= bbox.Min.X && other.Max.X <= bbox.Max.X &&
+        other.Min.Y >= bbox.Min.Y && other.Max.Y <= bbox.Max.Y &&
+        other.Min.Z >= bbox.Min.Z && other.Max.Z <= bbox.Max.Z;
+
+    /// <summary>
+    /// Returns the geometric centre of <paramref name="bbox"/>.
+    /// </summary>
+    public static XYZ ComputeCentroid(this BoundingBoxXYZ bbox) =>
+        new XYZ(
+            (bbox.Min.X + bbox.Max.X) / 2,
+            (bbox.Min.Y + bbox.Max.Y) / 2,
+            (bbox.Min.Z + bbox.Max.Z) / 2);
+
+    /// <summary>
+    /// Returns the volume of <paramref name="bbox"/> (width × depth × height).
+    /// Returns <c>0</c> for degenerate boxes where any dimension is zero or negative.
+    /// </summary>
+    public static double ComputeVolume(this BoundingBoxXYZ bbox)
+    {
+        double dx = bbox.Max.X - bbox.Min.X;
+        double dy = bbox.Max.Y - bbox.Min.Y;
+        double dz = bbox.Max.Z - bbox.Min.Z;
+        return dx <= 0 || dy <= 0 || dz <= 0 ? 0 : dx * dy * dz;
+    }
+
+    /// <summary>
     /// Projects <paramref name="curve"/> orthogonally onto <paramref name="plane"/>.
     /// <list type="bullet">
     ///   <item><see cref="Line"/> — reconstructed from projected endpoints.</item>
@@ -208,8 +276,8 @@ public static class GeometryExtensions
         return curve switch
         {
             Line => Line.CreateBound(pts[0], pts[pts.Length - 1]),
-            Arc  => Arc.Create(pts[0], pts[pts.Length - 1], pts[pts.Length / 2]),
-            _    => NurbSpline.CreateCurve(pts, Enumerable.Repeat(1.0, pts.Length).ToArray()),
+            Arc => Arc.Create(pts[0], pts[pts.Length - 1], pts[pts.Length / 2]),
+            _ => NurbSpline.CreateCurve(pts, Enumerable.Repeat(1.0, pts.Length).ToArray()),
         };
     }
 }

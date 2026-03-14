@@ -165,6 +165,33 @@ public static class ParameterExtensions
     }
 
     // -------------------------------------------------------------------------
+    // Element helper
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns the element referenced by this <see cref="StorageType.ElementId"/> parameter,
+    /// cast to <typeparamref name="T"/>.
+    /// Returns <c>null</c> when the parameter is <c>null</c>, has no value,
+    /// is not an <see cref="StorageType.ElementId"/> parameter,
+    /// or the element is not of type <typeparamref name="T"/>.
+    /// </summary>
+    public static T? AsElement<T>(this Parameter parameter, Document document)
+        where T : Element
+    {
+        if (parameter is null || !parameter.HasValue)
+            return null;
+
+        if (parameter.StorageType != StorageType.ElementId)
+            return null;
+
+        ElementId id = parameter.AsElementId();
+        if (id is null)
+            return null;
+
+        return document.GetElement(id) as T;
+    }
+
+    // -------------------------------------------------------------------------
     // Boolean helper
     // -------------------------------------------------------------------------
 

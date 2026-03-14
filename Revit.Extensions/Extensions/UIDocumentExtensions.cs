@@ -18,7 +18,7 @@ public static class UIDocumentExtensions
     /// Wall? wall = uidoc.PickElementByClass&lt;Wall&gt;();
     /// </code>
     /// </example>
-    public static T? PickElementByClass<T>(this UIDocument uidoc)
+    public static T? PickElementByClass<T>(this UIDocument uidoc, string? statusPrompt = null)
         where T : Element
     {
         try
@@ -26,7 +26,7 @@ public static class UIDocumentExtensions
             Reference? reference = uidoc.Selection.PickObject(
                 ObjectType.Element,
                 new ClassFilter<T>(),
-                "Pick element");
+                statusPrompt ?? "Pick element");
 
             if (reference is null)
                 return null;
@@ -40,7 +40,6 @@ public static class UIDocumentExtensions
         }
         catch
         {
-            // User cancelled (OperationCanceledException) or selection failed.
             return null;
         }
     }

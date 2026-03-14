@@ -1,5 +1,3 @@
-using System.Collections.Generic;
-using System.Linq;
 using Autodesk.Revit.DB;
 
 namespace Revit.Extensions;
@@ -17,10 +15,10 @@ public static class FamilyExtensions
     public static List<FamilyParameter> GetFamilyParameters(this FamilyManager familyManager)
     {
         if (familyManager is null)
-            return new List<FamilyParameter>();
+            return [];
 
         return familyManager.Parameters
-            .Cast<FamilyParameter>()
+            .OfType<FamilyParameter>()
             .ToList();
     }
 }

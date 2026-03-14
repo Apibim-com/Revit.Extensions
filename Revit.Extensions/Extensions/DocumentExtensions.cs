@@ -32,11 +32,9 @@ public static class DocumentExtensions
     public static BuiltInCategory GetBuiltInCategory(this Document document, string categoryName)
     {
 #if REVIT_2024 || REVIT_2023 || REVIT_2022 || REVIT_2021 || REVIT_2020
-        var result = document.GetValidCategories()
+        return document.GetValidCategories()
                     .FirstOrDefault(
                         bic => Category.GetCategory(document, bic).Name == categoryName);
-
-        return result;
 #else
 
         return document.GetValidCategories()

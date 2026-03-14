@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using Autodesk.Revit.DB;
 
 namespace Revit.Extensions;
@@ -25,16 +22,16 @@ public static class DrawExtensions
     // Predefined Revit colors
     // -------------------------------------------------------------------------
 
-    public static Color White     => new(255, 255, 255);
-    public static Color Black     => new(0,   0,   0  );
-    public static Color Blue      => new(0,   0,   255);
-    public static Color Red       => new(255, 0,   0  );
-    public static Color Green     => new(0,   255, 0  );
-    public static Color DarkGreen => new(0,   128, 0  );
-    public static Color Purple    => new(255, 0,   255);
-    public static Color Cyan      => new(0,   255, 255);
-    public static Color Orange    => new(255, 153, 76 );
-    public static Color DarkBlue  => new(0,   0,   102);
+    public static Color White => new(255, 255, 255);
+    public static Color Black => new(0, 0, 0);
+    public static Color Blue => new(0, 0, 255);
+    public static Color Red => new(255, 0, 0);
+    public static Color Green => new(0, 255, 0);
+    public static Color DarkGreen => new(0, 128, 0);
+    public static Color Purple => new(255, 0, 255);
+    public static Color Cyan => new(0, 255, 255);
+    public static Color Orange => new(255, 153, 76);
+    public static Color DarkBlue => new(0, 0, 102);
 
     // -------------------------------------------------------------------------
     // DrawLine
@@ -44,8 +41,7 @@ public static class DrawExtensions
     /// Creates a <see cref="DirectShape"/> line in the model.
     /// Returns <c>null</c> when the line is degenerate (zero length).
     /// </summary>
-    public static DirectShape? DrawLine(
-        this Document document,
+    public static DirectShape? DrawLine(this Document document,
         Line line,
         Color? color = null,
         View? view = null)
@@ -60,8 +56,7 @@ public static class DrawExtensions
     }
 
     /// <summary>Creates a <see cref="DirectShape"/> line between two points.</summary>
-    public static DirectShape? DrawLine(
-        this Document document,
+    public static DirectShape? DrawLine(this Document document,
         XYZ point1,
         XYZ point2,
         Color? color = null,
@@ -81,8 +76,8 @@ public static class DrawExtensions
     /// Creates two perpendicular <see cref="DirectShape"/> lines centred on
     /// <paramref name="point"/> along the X and Y axes.
     /// </summary>
-    public static void DrawCross(
-        this Document document,
+    /// <param name="radius">length in feet</param>
+    public static void DrawCross(this Document document,
         XYZ point,
         double radius = 0.328084,
         Color? color = null,
@@ -101,8 +96,8 @@ public static class DrawExtensions
     /// Creates a sphere <see cref="DirectShape"/> at <paramref name="point"/>,
     /// optionally labelled with a <see cref="TextNote"/>.
     /// </summary>
-    public static DirectShape DrawPoint(
-        this Document document,
+    /// <param name="radius">radius in feet</param>
+    public static DirectShape DrawPoint(this Document document,
         XYZ point,
         string? label = null,
         double radius = 0.328084,
@@ -124,9 +119,8 @@ public static class DrawExtensions
         profile.Append(axis);
         profile.Append(arc);
 
-        Solid sphere = GeometryCreationUtilities.CreateRevolvedGeometry(
-            new Frame(point, XYZ.BasisX, XYZ.BasisY, XYZ.BasisZ),
-            new[] { profile }, -Math.PI, Math.PI);
+        Solid sphere = GeometryCreationUtilities.CreateRevolvedGeometry(new Frame(point, XYZ.BasisX, XYZ.BasisY, XYZ.BasisZ),
+            [profile], -Math.PI, Math.PI);
 
         DirectShape shape = document.CreateDirectShape(sphere);
         shape.SetName("DebugPoint");
@@ -148,8 +142,7 @@ public static class DrawExtensions
     // -------------------------------------------------------------------------
 
     /// <summary>Creates a <see cref="TextNote"/> at <paramref name="point"/>.</summary>
-    public static TextNote DrawText(
-        this Document document,
+    public static TextNote DrawText(this Document document,
         string text,
         XYZ point,
         Color? color = null,
@@ -167,8 +160,7 @@ public static class DrawExtensions
     // -------------------------------------------------------------------------
 
     /// <summary>Creates <see cref="DirectShape"/> lines for each segment in <paramref name="lines"/>.</summary>
-    public static void DrawPolygon(
-        this Document document,
+    public static void DrawPolygon(this Document document,
         IEnumerable<Line> lines,
         Color? color = null,
         View? view = null)
@@ -196,8 +188,7 @@ public static class DrawExtensions
     /// Draws the 12 edges of <paramref name="bbox"/> as <see cref="DirectShape"/> lines.
     /// Pass <paramref name="drawPoints"/> to also mark the 8 corners with spheres.
     /// </summary>
-    public static void DrawDebug(
-        this BoundingBoxXYZ bbox,
+    public static void Draw(this BoundingBoxXYZ bbox,
         Document document,
         Color? color = null,
         bool drawPoints = false,
@@ -219,12 +210,11 @@ public static class DrawExtensions
     // Private helpers
     // -------------------------------------------------------------------------
 
-    private static void DrawBox(
-        Document document, XYZ[] v, Color color, bool drawPoints, View? view)
+    private static void DrawBox(Document document, XYZ[] v, Color color, bool drawPoints, View? view)
     {
         // Bottom face, top face
-        document.DrawPolygon(new[] { v[0], v[1], v[2], v[3] }, color, view);
-        document.DrawPolygon(new[] { v[4], v[5], v[6], v[7] }, color, view);
+        document.DrawPolygon([v[0], v[1], v[2], v[3]], color, view);
+        document.DrawPolygon([v[4], v[5], v[6], v[7]], color, view);
 
         // Vertical edges
         foreach ((int b, int t) in new[] { (0, 4), (1, 5), (2, 6), (3, 7) })
