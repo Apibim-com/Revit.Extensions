@@ -79,6 +79,7 @@ public static class ParameterExtensions
         return element.Document?.GetElement(typeId)?.LookupParameter(parameterName);
     }
 
+#if !REVIT_2020 && !REVIT_2021
     /// <summary>
     /// Returns a sorted list of shared/project parameter names that are filterable for
     /// <paramref name="category"/> and whose data type matches <paramref name="specTypeId"/>.
@@ -139,6 +140,7 @@ public static class ParameterExtensions
             .OrderBy(name => name)
             .ToList();
     }
+#endif
 
     // -------------------------------------------------------------------------
     // Type parameters
@@ -205,7 +207,7 @@ public static class ParameterExtensions
         if (parameter is null || !parameter.HasValue)
             return false;
 
-#if REVIT_2020
+#if REVIT_2020 || REVIT_2021
         if (parameter.Definition.ParameterType != ParameterType.YesNo)
             return false;
 #else

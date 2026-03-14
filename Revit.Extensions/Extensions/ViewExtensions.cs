@@ -26,6 +26,7 @@ public static class ViewExtensions
         return id.IsValid() ? view.Document.GetElement(id) : null;
     }
 
+#if !REVIT_2020 && !REVIT_2021 && !REVIT_2022
     public static Viewport? GetViewport(this View view)
     {
         var status = view.GetPlacementOnSheetStatus();
@@ -42,4 +43,5 @@ public static class ViewExtensions
             .WherePasses(filter)
             .FirstElement() as Viewport;
     }
+#endif
 }

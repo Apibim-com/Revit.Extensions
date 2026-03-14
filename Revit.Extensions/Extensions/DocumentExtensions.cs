@@ -51,7 +51,11 @@ public static class DocumentExtensions
     public static bool ViewExists(this Document document, string viewName)
     {
         var pvp = new ParameterValueProvider(new ElementId(BuiltInParameter.VIEW_NAME));
+#if REVIT_2020 || REVIT_2021 || REVIT_2022
+        var rule = new FilterStringRule(pvp, new FilterStringEquals(), viewName, true);
+#else
         var rule = new FilterStringRule(pvp, new FilterStringEquals(), viewName);
+#endif
         var filter = new ElementParameterFilter(rule);
 
         return new FilteredElementCollector(document)

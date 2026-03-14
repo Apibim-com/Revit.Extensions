@@ -11,27 +11,40 @@ namespace Revit.Extensions;
 /// Geometry is visible until the instance is disposed.
 /// </summary>
 /// <remarks>
-/// Register once (e.g. at command start) and dispose when done.
+/// The session must outlive the command that creates it — do NOT wrap it in a
+/// <c>using</c> statement inside <c>IExternalCommand.Execute()</c>.
+/// Revit renders the view after <c>Execute()</c> returns, so the session must
+/// still be alive at that point. Store it as a field on your Application or
+/// command class and call <see cref="Dispose"/> explicitly when done.
 /// <code>
+/// // ✓ correct — stored at application scope
+/// App.DrawSession = new DrawSession(uiApp);
+/// App.DrawSession.DrawLine(pt1, pt2);
+///
+/// // ✗ wrong — disposed before Revit renders
 /// using var draw = new DrawSession(uiApp);
-/// draw.DrawLine(pt1, pt2, DrawExtensions.Red)
-///     .DrawPoint(center)
-///     .DrawBoundingBox(bbox);
-/// // geometry disappears when draw is disposed at end of using block
+/// draw.DrawLine(pt1, pt2);
 /// </code>
 /// </remarks>
 public sealed class DrawSession : IDirectContext3DServer, IDisposable
 {
     // -------------------------------------------------------------------------
-    // Primitive storage
+    // Primitive storage  (main thread only)
     // -------------------------------------------------------------------------
 
-    // Each line stored as (from, to, R, G, B) to avoid Color equality issues
     private readonly List<(XYZ From, XYZ To, byte R, byte G, byte B)> _lines = new();
 
-    // Cached GPU buffers grouped by colour — rebuilt when _isDirty is true
+    // -------------------------------------------------------------------------
+    // GPU buffers  (rebuilt on render thread when _isDirty is true)
+    // -------------------------------------------------------------------------
+
     private readonly List<(VertexBuffer Vb, int VbCount, IndexBuffer Ib, int IbCount, int PrimCount, byte R, byte G, byte B)> _buffers = new();
-    private bool _isDirty;
+    private volatile bool _isDirty;
+
+    // Bounding box cached on the main thread; read on the render thread.
+    // Per the DirectContext3D spec, GetBoundingBox() may be called from a
+    // different thread — never compute it inline from _lines there.
+    private volatile Outline? _cachedOutline;
 
     private readonly Guid _serverId = Guid.NewGuid();
     private readonly UIApplication _uiApp;
@@ -49,7 +62,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     }
 
     // -------------------------------------------------------------------------
-    // Fluent drawing API
+    // Fluent drawing API  (call from main / UI thread)
     // -------------------------------------------------------------------------
 
     /// <summary>Draws a line between two points.</summary>
@@ -116,19 +129,28 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     public string GetName() => "DrawSession";
     public string GetDescription() => "Revit.Extensions transient geometry renderer";
     public string GetVendorId() => "Revit.Extensions";
-
     public string GetApplicationId() => "Revit.Extensions.DrawSession";
     public string GetSourceId() => _serverId.ToString();
     public bool UsesHandles() => false;
 
     public bool CanExecute(View view) => !_disposed && _lines.Count > 0 && view is View3D;
+
     public bool UseInTransparentPass(View view) => false;
-    public Outline? GetBoundingBox(View view) => null;
+
+    /// <summary>
+    /// Called from the render thread — returns a pre-computed outline.
+    /// Never access <c>_lines</c> here; it belongs to the main thread.
+    /// </summary>
+    public Outline? GetBoundingBox(View view) => _cachedOutline;
 
     public void RenderScene(View view, DisplayStyle displayStyle)
     {
         try
         {
+            // Skip the transparent pass — we only draw opaque lines.
+            if (DrawContext.IsTransparentPass())
+                return;
+
             if (_isDirty)
                 RebuildBuffers();
 
@@ -136,9 +158,10 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
             foreach (var (vb, vbCount, ib, ibCount, primCount, r, g, b) in _buffers)
             {
-                var fmt = new VertexFormat(VertexFormatBits.Position);
-                var eff = new EffectInstance(VertexFormatBits.Position);
+                using var fmt = new VertexFormat(VertexFormatBits.Position);
+                using var eff = new EffectInstance(VertexFormatBits.Position);
                 eff.SetColor(new Color(r, g, b));
+                eff.SetTransparency(0.0);
                 DrawContext.FlushBuffer(
                     vb, vbCount, ib, ibCount, fmt, eff,
                     PrimitiveType.LineList, 0, primCount);
@@ -146,7 +169,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         }
         catch
         {
-            // Never crash the Revit render loop
+            // Never crash the Revit render loop.
         }
     }
 
@@ -163,17 +186,53 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         return this;
     }
 
+    /// <summary>
+    /// Called from the main thread after every mutation.
+    /// Updates the cached outline (safe to read from the render thread),
+    /// marks buffers dirty, and requests a view refresh.
+    /// </summary>
     private void Invalidate()
     {
+        _cachedOutline = ComputeOutline();  // main thread — safe to read _lines
         _isDirty = true;
         _uiApp.ActiveUIDocument?.RefreshActiveView();
     }
 
+    /// <summary>Computes a world-space bounding outline from the current lines.</summary>
+    private Outline? ComputeOutline()
+    {
+        if (_lines.Count == 0) return null;
+
+        double minX = double.MaxValue, minY = double.MaxValue, minZ = double.MaxValue;
+        double maxX = double.MinValue, maxY = double.MinValue, maxZ = double.MinValue;
+
+        foreach (var (from, to, _, _, _) in _lines)
+        {
+            minX = Math.Min(minX, Math.Min(from.X, to.X));
+            minY = Math.Min(minY, Math.Min(from.Y, to.Y));
+            minZ = Math.Min(minZ, Math.Min(from.Z, to.Z));
+            maxX = Math.Max(maxX, Math.Max(from.X, to.X));
+            maxY = Math.Max(maxY, Math.Max(from.Y, to.Y));
+            maxZ = Math.Max(maxZ, Math.Max(from.Z, to.Z));
+        }
+
+        // Small epsilon prevents a degenerate outline on flat / collinear geometry.
+        const double eps = 0.01;
+        return new Outline(
+            new XYZ(minX - eps, minY - eps, minZ - eps),
+            new XYZ(maxX + eps, maxY + eps, maxZ + eps));
+    }
+
     private void RebuildBuffers()
     {
+        foreach (var (vb, _, ib, _, _, _, _, _) in _buffers)
+        {
+            vb.Dispose();
+            ib.Dispose();
+        }
         _buffers.Clear();
 
-        // Group lines by colour to minimise FlushBuffer calls
+        // Group lines by colour to minimise FlushBuffer calls.
         var groups = new Dictionary<(byte R, byte G, byte B), List<(XYZ From, XYZ To)>>();
         foreach (var (from, to, r, g, b) in _lines)
         {
@@ -182,7 +241,6 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
                 groups[key] = list = new();
             list.Add((from, to));
         }
-
 
 #if REVIT_2024 || REVIT_2023 || REVIT_2022 || REVIT_2021 || REVIT_2020
         foreach (var item in groups)
@@ -193,13 +251,12 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         foreach (var (key, lines) in groups)
         {
 #endif
-
             int nVerts = lines.Count * 2;
             int nPrims = lines.Count;
             int ibSize = nPrims * IndexLine.GetSizeInShortInts();
 
             var vb = new VertexBuffer(nVerts * VertexPosition.GetSizeInFloats());
-            vb.Map(nVerts * VertexPosition.GetSizeInFloats());
+            vb.Map(0);
             var vs = vb.GetVertexStreamPosition();
             foreach (var (from, to) in lines)
             {
@@ -209,7 +266,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
             vb.Unmap();
 
             var ib = new IndexBuffer(ibSize);
-            ib.Map(ibSize);
+            ib.Map(0);
             var ixs = ib.GetIndexStreamLine();
             for (int i = 0; i < nPrims; i++)
                 ixs.AddLine(new IndexLine(i * 2, i * 2 + 1));
@@ -253,5 +310,11 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         if (_disposed) return;
         _disposed = true;
         Unregister();
+        foreach (var (vb, _, ib, _, _, _, _, _) in _buffers)
+        {
+            vb.Dispose();
+            ib.Dispose();
+        }
+        _buffers.Clear();
     }
 }
