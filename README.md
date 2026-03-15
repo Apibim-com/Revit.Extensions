@@ -43,6 +43,88 @@ The package automatically targets the correct framework — no manual configurat
 
 ## API reference
 
+### `DrawSession` — transient geometry (no transaction required)
+
+`DrawSession` renders geometry directly into Revit's 3D views via the DirectContext3D API. No model elements are created and no `Transaction` is needed. Geometry disappears when the session is disposed or cleared.
+
+**Setup in `App.cs`:**
+
+```csharp
+using Revit.Extensions;
+
+public class App : IExternalApplication
+{
+    public static DrawSession? DrawSession { get; private set; }
+
+    public Result OnStartup(UIControlledApplication application)
+    {
+        // Register with DirectContext3D service — must be called in OnStartup.
+        DrawSession = application.RegisterDrawSession();
+        // ...
+        return Result.Succeeded;
+    }
+
+    public Result OnShutdown(UIControlledApplication application)
+    {
+        DrawSession?.Dispose();   // unregisters the server and releases GPU buffers
+        DrawSession = null;
+        return Result.Succeeded;
+    }
+}
+```
+
+**Drawing from a command:**
+
+```csharp
+public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+{
+    var session = App.DrawSession;
+    if (session is null) return Result.Failed;
+
+    // Supply UIApplication once — needed for RefreshActiveView().
+    session.SetUIApplication(commandData.Application);
+
+    session
+        .DrawLine(new XYZ(0, 0, 0), new XYZ(10, 0, 0), DrawExtensions.Blue)
+        .DrawCross(new XYZ(5, 0, 0), radius: 0.5, DrawExtensions.Red)
+        .DrawPoint(new XYZ(5, 5, 0), radius: 0.3, DrawExtensions.Green)
+        .DrawPolygon(new[] { new XYZ(0,0,0), new XYZ(10,0,0), new XYZ(5,10,0) }, DrawExtensions.Orange)
+        .DrawBoundingBox(element.get_BoundingBox(null), DrawExtensions.Cyan);
+
+    // Run the command again to clear:
+    // session.Clear();
+
+    return Result.Succeeded;
+}
+```
+
+**Available colors** (`DrawExtensions` static properties):
+`White` · `Black` · `Blue` · `Red` · `Green` · `DarkGreen` · `Purple` · `Cyan` · `Orange` · `DarkBlue`
+
+> **Important:** Do **not** wrap `DrawSession` in a `using` statement inside a command. Revit renders the 3D view *after* `Execute()` returns, so the session must stay alive. Store it at application scope and call `Dispose()` only in `OnShutdown`.
+
+---
+
+### `DrawExtensions` — persistent geometry (requires transaction)
+
+Creates `DirectShape` elements and text notes permanently in the model. All methods must be called inside an active `Transaction`.
+
+```csharp
+using var t = new Transaction(doc, "Debug draw");
+t.Start();
+
+doc.DrawLine(pt1, pt2, DrawExtensions.Red);
+doc.DrawCross(center, radius: 0.5, DrawExtensions.Blue);
+doc.DrawPoint(center, label: "P0", radius: 0.3, DrawExtensions.Green);
+doc.DrawText("Hello", position, DrawExtensions.Purple);
+doc.DrawPolygon(new[] { p0, p1, p2 }, DrawExtensions.Orange);
+bbox.Draw(doc, DrawExtensions.Cyan, drawPoints: true);
+
+t.Commit();
+```
+
+---
+
 ### `GeometryExtensions`
 
 Helpers for working with Revit geometry types (`XYZ`, `Outline`, `BoundingBoxXYZ`).

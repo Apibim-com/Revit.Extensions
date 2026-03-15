@@ -7,23 +7,32 @@ namespace Revit.Extensions;
 
 /// <summary>
 /// Renders truly transient geometry via <see cref="IDirectContext3DServer"/>.
+/// Supports lines, solids (faces + edges) and meshes.
 /// No model elements are created and no <see cref="Transaction"/> is required.
-/// Geometry is visible until the instance is disposed.
+/// Geometry is visible until the instance is disposed or <see cref="Clear"/> is called.
 /// </summary>
 /// <remarks>
-/// The session must outlive the command that creates it — do NOT wrap it in a
+/// <b>Registration</b> is NOT automatic — call
+/// <see cref="UIControlledApplicationExtensions.RegisterDrawSession"/> from
+/// <c>IExternalApplication.OnStartup</c>:
+/// <code>
+/// // OnStartup
+/// App.Session = application.RegisterDrawSession();
+///
+/// // OnShutdown
+/// App.Session?.Dispose();
+/// </code>
+///
+/// The session must outlive the command that draws into it — do NOT wrap it in a
 /// <c>using</c> statement inside <c>IExternalCommand.Execute()</c>.
 /// Revit renders the view after <c>Execute()</c> returns, so the session must
-/// still be alive at that point. Store it as a field on your Application or
-/// command class and call <see cref="Dispose"/> explicitly when done.
+/// still be alive at that point.
 /// <code>
-/// // ✓ correct — stored at application scope
-/// App.DrawSession = new DrawSession(uiApp);
-/// App.DrawSession.DrawLine(pt1, pt2);
+/// // ✓ correct — stored at application scope, disposed in OnShutdown
+/// App.Session.DrawLine(pt1, pt2);
 ///
 /// // ✗ wrong — disposed before Revit renders
-/// using var draw = new DrawSession(uiApp);
-/// draw.DrawLine(pt1, pt2);
+/// using var s = new DrawSession(); s.DrawLine(pt1, pt2);
 /// </code>
 /// </remarks>
 public sealed class DrawSession : IDirectContext3DServer, IDisposable
@@ -34,35 +43,66 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
     private readonly List<(XYZ From, XYZ To, byte R, byte G, byte B)> _lines = new();
 
+    // Solid: face color + transparency + edge color stored together.
+    private readonly List<(Solid Solid, byte FR, byte FG, byte FB, double Transparency, byte ER, byte EG, byte EB)> _solids = new();
+
+    // Mesh: triangulated surface, flat-shaded.
+    private readonly List<(Mesh Mesh, byte R, byte G, byte B)> _meshes = new();
+
     // -------------------------------------------------------------------------
     // GPU buffers  (rebuilt on render thread when _isDirty is true)
     // -------------------------------------------------------------------------
 
-    private readonly List<(VertexBuffer Vb, int VbCount, IndexBuffer Ib, int IbCount, int PrimCount, byte R, byte G, byte B)> _buffers = new();
+    // Line buffers — VertexFormatBits.Position + LineList
+    private readonly List<(VertexBuffer Vb, int VbCount, IndexBuffer Ib, int IbCount, int PrimCount, byte R, byte G, byte B)> _lineBuffers = new();
+
+    // Triangle buffers — VertexFormatBits.PositionNormal + TriangleList
+    // Transparency field: 0.0 = opaque, 1.0 = fully transparent.
+    private readonly List<(VertexBuffer Vb, int VbCount, IndexBuffer Ib, int IbCount, int PrimCount, byte R, byte G, byte B, double Transparency)> _triBuffers = new();
+
     private volatile bool _isDirty;
+    private volatile bool _hasTransparency;
 
     // Bounding box cached on the main thread; read on the render thread.
     // Per the DirectContext3D spec, GetBoundingBox() may be called from a
-    // different thread — never compute it inline from _lines there.
+    // different thread — never compute it inline from _lines/_solids/_meshes there.
     private volatile Outline? _cachedOutline;
 
     private readonly Guid _serverId = Guid.NewGuid();
-    private readonly UIApplication _uiApp;
+    private UIApplication? _uiApp;
     private bool _disposed;
 
     // -------------------------------------------------------------------------
     // Construction
     // -------------------------------------------------------------------------
 
-    /// <summary>Creates the draw session and registers it with Revit's DirectContext3D service.</summary>
-    public DrawSession(UIApplication uiApp)
+    /// <summary>
+    /// Creates the draw session.
+    /// </summary>
+    /// <param name="uiApp">
+    /// Optional. Required only for automatic view refresh after drawing calls.
+    /// Can be omitted when constructing via
+    /// <see cref="UIControlledApplicationExtensions.RegisterDrawSession"/> (called in
+    /// <c>OnStartup</c>) and supplied later via <see cref="SetUIApplication"/>.
+    /// </param>
+    /// <remarks>
+    /// Registration with Revit's DirectContext3D service is NOT performed automatically.
+    /// Use <see cref="UIControlledApplicationExtensions.RegisterDrawSession"/> instead.
+    /// </remarks>
+    public DrawSession(UIApplication? uiApp = null)
     {
-        _uiApp = uiApp ?? throw new ArgumentNullException(nameof(uiApp));
-        Register();
+        _uiApp = uiApp;
     }
 
+    /// <summary>
+    /// Supplies the <see cref="UIApplication"/> needed for automatic view refresh.
+    /// Call this once from the first <see cref="Autodesk.Revit.UI.IExternalCommand"/> that uses the session.
+    /// </summary>
+    public void SetUIApplication(UIApplication uiApp) =>
+        _uiApp = uiApp ?? throw new ArgumentNullException(nameof(uiApp));
+
     // -------------------------------------------------------------------------
-    // Fluent drawing API  (call from main / UI thread)
+    // Fluent drawing API — lines  (call from main / UI thread)
     // -------------------------------------------------------------------------
 
     /// <summary>Draws a line between two points.</summary>
@@ -109,10 +149,69 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     public DrawSession DrawBoundingBox(Outline outline, Color? color = null) =>
         DrawBox(outline.ComputeVertices(), color);
 
+    // -------------------------------------------------------------------------
+    // Fluent drawing API — solids & meshes  (call from main / UI thread)
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Draws a <see cref="Solid"/> with shaded faces and tessellated edges.
+    /// Faces are rendered as <c>PositionNormal</c> triangles; edges as lines.
+    /// </summary>
+    /// <param name="solid">The solid to render.</param>
+    /// <param name="faceColor">Face fill color. Defaults to <see cref="DrawExtensions.Blue"/>.</param>
+    /// <param name="edgeColor">Edge line color. Defaults to <see cref="DrawExtensions.DarkBlue"/>.</param>
+    /// <param name="transparency">Face transparency 0.0 (opaque) – 1.0 (invisible).</param>
+    public DrawSession DrawSolid(Solid solid,
+        Color? faceColor = null,
+        Color? edgeColor = null,
+        double transparency = 0.0)
+    {
+        if (solid is null || solid.Volume <= 0) return this;
+
+        Color fc = faceColor ?? DrawExtensions.Blue;
+        Color ec = edgeColor ?? DrawExtensions.DarkBlue;
+        _solids.Add((solid, fc.Red, fc.Green, fc.Blue,
+                     transparency < 0.0 ? 0.0 : transparency > 1.0 ? 1.0 : transparency,
+                     ec.Red, ec.Green, ec.Blue));
+
+        // Tessellate edges as lines — they share the line buffer pipeline.
+        foreach (Edge edge in solid.Edges)
+        {
+            IList<XYZ> pts = edge.Tessellate();
+            for (int i = 0; i < pts.Count - 1; i++)
+                if (!pts[i].IsAlmostEqualTo(pts[i + 1]))
+                    _lines.Add((pts[i], pts[i + 1], ec.Red, ec.Green, ec.Blue));
+        }
+
+        Invalidate();
+        return this;
+    }
+
+    /// <summary>
+    /// Draws a <see cref="Mesh"/> as flat-shaded triangles (per-triangle normals).
+    /// </summary>
+    /// <param name="mesh">The mesh to render.</param>
+    /// <param name="color">Fill color. Defaults to <see cref="DrawExtensions.Blue"/>.</param>
+    public DrawSession DrawMesh(Mesh mesh, Color? color = null)
+    {
+        if (mesh is null || mesh.NumTriangles == 0) return this;
+
+        Color c = color ?? DrawExtensions.Blue;
+        _meshes.Add((mesh, c.Red, c.Green, c.Blue));
+        Invalidate();
+        return this;
+    }
+
+    // -------------------------------------------------------------------------
+    // Session management
+    // -------------------------------------------------------------------------
+
     /// <summary>Removes all drawn primitives without disposing the session.</summary>
     public DrawSession Clear()
     {
         _lines.Clear();
+        _solids.Clear();
+        _meshes.Clear();
         Invalidate();
         return this;
     }
@@ -133,13 +232,20 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     public string GetSourceId() => _serverId.ToString();
     public bool UsesHandles() => false;
 
-    public bool CanExecute(View view) => !_disposed && _lines.Count > 0 && view is View3D;
+    public bool CanExecute(View view) =>
+        !_disposed
+        && (_lines.Count > 0 || _solids.Count > 0 || _meshes.Count > 0)
+        && view is View3D;
 
-    public bool UseInTransparentPass(View view) => false;
+    /// <summary>
+    /// Returns <c>true</c> when any solid has transparency > 0,
+    /// so Revit calls <see cref="RenderScene"/> a second time for the transparent pass.
+    /// </summary>
+    public bool UseInTransparentPass(View view) => !_disposed && _hasTransparency;
 
     /// <summary>
     /// Called from the render thread — returns a pre-computed outline.
-    /// Never access <c>_lines</c> here; it belongs to the main thread.
+    /// Never access <c>_lines</c> / <c>_solids</c> / <c>_meshes</c> here.
     /// </summary>
     public Outline? GetBoundingBox(View view) => _cachedOutline;
 
@@ -147,24 +253,42 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     {
         try
         {
-            // Skip the transparent pass — we only draw opaque lines.
-            if (DrawContext.IsTransparentPass())
-                return;
-
             if (_isDirty)
                 RebuildBuffers();
 
+            bool isTransparentPass = DrawContext.IsTransparentPass();
             DrawContext.SetWorldTransform(Transform.Identity);
 
-            foreach (var (vb, vbCount, ib, ibCount, primCount, r, g, b) in _buffers)
+            // Lines and opaque faces — opaque pass only.
+            if (!isTransparentPass)
             {
-                using var fmt = new VertexFormat(VertexFormatBits.Position);
-                using var eff = new EffectInstance(VertexFormatBits.Position);
-                eff.SetColor(new Color(r, g, b));
-                eff.SetTransparency(0.0);
-                DrawContext.FlushBuffer(
-                    vb, vbCount, ib, ibCount, fmt, eff,
-                    PrimitiveType.LineList, 0, primCount);
+                // Lines
+                foreach (var (vb, vbCount, ib, ibCount, primCount, r, g, b) in _lineBuffers)
+                {
+                    using var fmt = new VertexFormat(VertexFormatBits.Position);
+                    using var eff = new EffectInstance(VertexFormatBits.Position);
+                    eff.SetColor(new Color(r, g, b));
+                    eff.SetTransparency(0.0);
+                    DrawContext.FlushBuffer(
+                        vb, vbCount, ib, ibCount, fmt, eff,
+                        PrimitiveType.LineList, 0, primCount);
+                }
+
+                // Opaque triangle faces (solids + meshes)
+                foreach (var (vb, vbCount, ib, ibCount, primCount, r, g, b, transp) in _triBuffers)
+                {
+                    if (transp > 0.0) continue;
+                    FlushTriangleBuffer(vb, vbCount, ib, ibCount, primCount, r, g, b, 0.0);
+                }
+            }
+            else
+            {
+                // Transparent faces only — transparent pass
+                foreach (var (vb, vbCount, ib, ibCount, primCount, r, g, b, transp) in _triBuffers)
+                {
+                    if (transp <= 0.0) continue;
+                    FlushTriangleBuffer(vb, vbCount, ib, ibCount, primCount, r, g, b, transp);
+                }
             }
         }
         catch
@@ -176,6 +300,23 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    private static void FlushTriangleBuffer(
+        VertexBuffer vb, int vbCount,
+        IndexBuffer ib, int ibCount, int primCount,
+        byte r, byte g, byte b, double transparency)
+    {
+        using var fmt = new VertexFormat(VertexFormatBits.PositionNormal);
+        using var eff = new EffectInstance(VertexFormatBits.PositionNormal);
+        var color = new Color(r, g, b);
+        eff.SetColor(color);
+        eff.SetAmbientColor(color);
+        eff.SetDiffuseColor(color);
+        eff.SetTransparency(transparency);
+        DrawContext.FlushBuffer(
+            vb, vbCount, ib, ibCount, fmt, eff,
+            PrimitiveType.TriangleList, 0, primCount);
+    }
 
     private DrawSession DrawBox(XYZ[] v, Color? color)
     {
@@ -193,30 +334,57 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     /// </summary>
     private void Invalidate()
     {
-        _cachedOutline = ComputeOutline();  // main thread — safe to read _lines
+        _cachedOutline = ComputeOutline();
+        _hasTransparency = _solids.Any(s => s.Transparency > 0.0);
         _isDirty = true;
-        _uiApp.ActiveUIDocument?.RefreshActiveView();
+        _uiApp?.ActiveUIDocument?.RefreshActiveView();
     }
 
-    /// <summary>Computes a world-space bounding outline from the current lines.</summary>
+    /// <summary>Computes a world-space bounding outline from all current primitives.</summary>
     private Outline? ComputeOutline()
     {
-        if (_lines.Count == 0) return null;
-
+        bool any = false;
         double minX = double.MaxValue, minY = double.MaxValue, minZ = double.MaxValue;
         double maxX = double.MinValue, maxY = double.MinValue, maxZ = double.MinValue;
 
-        foreach (var (from, to, _, _, _) in _lines)
+        void Include(XYZ p)
         {
-            minX = Math.Min(minX, Math.Min(from.X, to.X));
-            minY = Math.Min(minY, Math.Min(from.Y, to.Y));
-            minZ = Math.Min(minZ, Math.Min(from.Z, to.Z));
-            maxX = Math.Max(maxX, Math.Max(from.X, to.X));
-            maxY = Math.Max(maxY, Math.Max(from.Y, to.Y));
-            maxZ = Math.Max(maxZ, Math.Max(from.Z, to.Z));
+            any = true;
+            if (p.X < minX) minX = p.X;
+            if (p.Y < minY) minY = p.Y;
+            if (p.Z < minZ) minZ = p.Z;
+            if (p.X > maxX) maxX = p.X;
+            if (p.Y > maxY) maxY = p.Y;
+            if (p.Z > maxZ) maxZ = p.Z;
         }
 
-        // Small epsilon prevents a degenerate outline on flat / collinear geometry.
+        foreach (var (from, to, _, _, _) in _lines)
+        {
+            Include(from);
+            Include(to);
+        }
+
+        foreach (var (solid, _, _, _, _, _, _, _) in _solids)
+        {
+            try
+            {
+                foreach (Face face in solid.Faces)
+                {
+                    Mesh m = face.Triangulate();
+                    if (m == null) continue;
+                    foreach (XYZ v in m.Vertices) Include(v);
+                }
+            }
+            catch { }
+        }
+
+        foreach (var (mesh, _, _, _) in _meshes)
+        {
+            foreach (XYZ v in mesh.Vertices) Include(v);
+        }
+
+        if (!any) return null;
+
         const double eps = 0.01;
         return new Outline(
             new XYZ(minX - eps, minY - eps, minZ - eps),
@@ -225,38 +393,34 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
     private void RebuildBuffers()
     {
-        foreach (var (vb, _, ib, _, _, _, _, _) in _buffers)
-        {
-            vb.Dispose();
-            ib.Dispose();
-        }
-        _buffers.Clear();
+        DisposeBuffers();
 
-        // Group lines by colour to minimise FlushBuffer calls.
-        var groups = new Dictionary<(byte R, byte G, byte B), List<(XYZ From, XYZ To)>>();
+        // ---- Line buffers ----
+        var lineGroups = new Dictionary<(byte R, byte G, byte B), List<(XYZ From, XYZ To)>>();
         foreach (var (from, to, r, g, b) in _lines)
         {
             var key = (r, g, b);
-            if (!groups.TryGetValue(key, out var list))
-                groups[key] = list = new();
+            if (!lineGroups.TryGetValue(key, out var list))
+                lineGroups[key] = list = new();
             list.Add((from, to));
         }
 
 #if REVIT_2024 || REVIT_2023 || REVIT_2022 || REVIT_2021 || REVIT_2020
-        foreach (var item in groups)
+        foreach (var lgItem in lineGroups)
         {
-            var key = item.Key;
-            var lines = item.Value;
+            var lKey = lgItem.Key;
+            var lines = lgItem.Value;
 #else
-        foreach (var (key, lines) in groups)
+        foreach (var (lKey, lines) in lineGroups)
         {
 #endif
             int nVerts = lines.Count * 2;
             int nPrims = lines.Count;
+            int vbSize = nVerts * VertexPosition.GetSizeInFloats();
             int ibSize = nPrims * IndexLine.GetSizeInShortInts();
 
-            var vb = new VertexBuffer(nVerts * VertexPosition.GetSizeInFloats());
-            vb.Map(0);
+            var vb = new VertexBuffer(vbSize);
+            vb.Map(vbSize);
             var vs = vb.GetVertexStreamPosition();
             foreach (var (from, to) in lines)
             {
@@ -266,19 +430,109 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
             vb.Unmap();
 
             var ib = new IndexBuffer(ibSize);
-            ib.Map(0);
+            ib.Map(ibSize);
             var ixs = ib.GetIndexStreamLine();
             for (int i = 0; i < nPrims; i++)
                 ixs.AddLine(new IndexLine(i * 2, i * 2 + 1));
             ib.Unmap();
 
-            _buffers.Add((vb, nVerts, ib, ibSize, nPrims, key.R, key.G, key.B));
+            _lineBuffers.Add((vb, nVerts, ib, ibSize, nPrims, lKey.R, lKey.G, lKey.B));
+        }
+
+        // ---- Triangle buffers (solid faces + meshes) ----
+        // Key: (R, G, B, Transparency) — group to minimise FlushBuffer calls.
+        var triGroups = new Dictionary<(byte R, byte G, byte B, double T), List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)>>();
+
+        // Collect solid face triangles
+        foreach (var (solid, fr, fg, fb, transp, _, _, _) in _solids)
+        {
+            var key = (fr, fg, fb, transp);
+            if (!triGroups.TryGetValue(key, out var tris))
+                triGroups[key] = tris = new();
+
+            try
+            {
+                foreach (Face face in solid.Faces)
+                {
+                    Mesh m = face.Triangulate();
+                    if (m == null) continue;
+                    AppendMeshTriangles(m, tris);
+                }
+            }
+            catch { }
+        }
+
+        // Collect mesh triangles
+        foreach (var (mesh, r, g, b) in _meshes)
+        {
+            var key = (r, g, b, 0.0);
+            if (!triGroups.TryGetValue(key, out var tris))
+                triGroups[key] = tris = new();
+            AppendMeshTriangles(mesh, tris);
+        }
+
+#if REVIT_2024 || REVIT_2023 || REVIT_2022 || REVIT_2021 || REVIT_2020
+        foreach (var tgItem in triGroups)
+        {
+            var tKey = tgItem.Key;
+            var tris = tgItem.Value;
+#else
+        foreach (var (tKey, tris) in triGroups)
+        {
+#endif
+            if (tris.Count == 0) continue;
+
+            int nVerts = tris.Count * 3;
+            int nPrims = tris.Count;
+            int vbSize = nVerts * VertexPositionNormal.GetSizeInFloats();
+            int ibSize = nPrims * IndexTriangle.GetSizeInShortInts();
+
+            var vb = new VertexBuffer(vbSize);
+            vb.Map(vbSize);
+            var vs = vb.GetVertexStreamPositionNormal();
+            foreach (var (v0, v1, v2, n) in tris)
+            {
+                vs.AddVertex(new VertexPositionNormal(v0, n));
+                vs.AddVertex(new VertexPositionNormal(v1, n));
+                vs.AddVertex(new VertexPositionNormal(v2, n));
+            }
+            vb.Unmap();
+
+            var ib = new IndexBuffer(ibSize);
+            ib.Map(ibSize);
+            var ixs = ib.GetIndexStreamTriangle();
+            for (int i = 0; i < nPrims; i++)
+                ixs.AddTriangle(new IndexTriangle(i * 3, i * 3 + 1, i * 3 + 2));
+            ib.Unmap();
+
+            _triBuffers.Add((vb, nVerts, ib, ibSize, nPrims, tKey.R, tKey.G, tKey.B, tKey.T));
         }
 
         _isDirty = false;
     }
 
-    private void Register()
+    /// <summary>Tessellates a <see cref="Mesh"/> into flat-shaded triangles.</summary>
+    private static void AppendMeshTriangles(
+        Mesh mesh,
+        List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)> tris)
+    {
+        for (int i = 0; i < mesh.NumTriangles; i++)
+        {
+            MeshTriangle tri = mesh.get_Triangle(i);
+            XYZ v0 = tri.get_Vertex(0);
+            XYZ v1 = tri.get_Vertex(1);
+            XYZ v2 = tri.get_Vertex(2);
+
+            XYZ edge1 = v1 - v0;
+            XYZ edge2 = v2 - v0;
+            XYZ cross = edge1.CrossProduct(edge2);
+
+            if (cross.GetLength() < 1e-10) continue; // degenerate triangle
+            tris.Add((v0, v1, v2, cross.Normalize()));
+        }
+    }
+
+    private void RegisterImpl()
     {
         if (ExternalServiceRegistry.GetService(
                 ExternalServices.BuiltInExternalServices.DirectContext3DService)
@@ -286,8 +540,11 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
         service.AddServer(this);
         IList<Guid> activeIds = service.GetActiveServerIds();
-        activeIds.Add(_serverId);
-        service.SetActiveServers(activeIds);
+        if (!activeIds.Contains(_serverId))
+        {
+            activeIds.Add(_serverId);
+            service.SetActiveServers(activeIds);
+        }
     }
 
     private void Unregister()
@@ -302,7 +559,24 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
         try { service.RemoveServer(_serverId); } catch { }
 
-        _uiApp.ActiveUIDocument?.RefreshActiveView();
+        _uiApp?.ActiveUIDocument?.RefreshActiveView();
+    }
+
+    private void DisposeBuffers()
+    {
+        foreach (var (vb, _, ib, _, _, _, _, _) in _lineBuffers)
+        {
+            vb.Dispose();
+            ib.Dispose();
+        }
+        _lineBuffers.Clear();
+
+        foreach (var (vb, _, ib, _, _, _, _, _, _) in _triBuffers)
+        {
+            vb.Dispose();
+            ib.Dispose();
+        }
+        _triBuffers.Clear();
     }
 
     public void Dispose()
@@ -310,11 +584,6 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         if (_disposed) return;
         _disposed = true;
         Unregister();
-        foreach (var (vb, _, ib, _, _, _, _, _) in _buffers)
-        {
-            vb.Dispose();
-            ib.Dispose();
-        }
-        _buffers.Clear();
+        DisposeBuffers();
     }
 }
