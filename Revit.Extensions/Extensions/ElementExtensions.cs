@@ -1,3 +1,4 @@
+using System;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 
@@ -40,52 +41,35 @@ public static class ElementExtensions
     }
 
     /// <summary>
-    /// Collects all grids visible on the view of the level closest to elevation zero.
-    /// Falls back to all grids in the document if no level with 2+ grids is found.
+    /// Returns the world-space bounding box of <paramref name="element"/> as an
+    /// <see cref="Outline"/> expanded by <paramref name="enlargement"/> on every side.
+    /// The default enlargement is 1 mm in feet (<c>0.00328084</c>).
+    /// Returns <c>null</c> when the element has no bounding box.
     /// </summary>
-    public static IList<Grid> GetAllGridFromFirstLevel(Document document, out string? firstLevelName)
+    public static Outline? GetEnlargedOutline(this Element element, double enlargement = OneMmInFt)
     {
-        var levels = new FilteredElementCollector(document, document.ActiveView.Id)
-            .OfClass(typeof(Level))
-            .OfType<Level>()
-            .OrderBy(l => Math.Abs(l.Elevation));
-
-        if (!levels.Any())
-            levels = new FilteredElementCollector(document)
-                .OfClass(typeof(Level))
-                .OfType<Level>()
-                .OrderBy(l => Math.Abs(l.Elevation));
-
-        foreach (var level in levels)
+        try
         {
-            ElementLevelFilter levelFilter = new(level.Id);
+            BoundingBoxXYZ? bbox = element.get_BoundingBox(null);
+            if (bbox is null)
+                return null;
 
-            var grids = new FilteredElementCollector(document, document.ActiveView.Id)
-                .OfClass(typeof(Grid))
-                .WherePasses(levelFilter)
-                .OfType<Grid>()
-                .ToList();
+            double minX = Math.Min(bbox.Min.X, bbox.Max.X);
+            double minY = Math.Min(bbox.Min.Y, bbox.Max.Y);
+            double minZ = Math.Min(bbox.Min.Z, bbox.Max.Z);
+            double maxX = Math.Max(bbox.Min.X, bbox.Max.X);
+            double maxY = Math.Max(bbox.Min.Y, bbox.Max.Y);
+            double maxZ = Math.Max(bbox.Min.Z, bbox.Max.Z);
 
-            if (grids.Count < 2)
-                continue;
-
-            firstLevelName = level.Name;
-            return grids;
+            return new Outline(
+                new XYZ(minX - enlargement, minY - enlargement, minZ - enlargement),
+                new XYZ(maxX + enlargement, maxY + enlargement, maxZ + enlargement));
         }
-
-        firstLevelName = null;
-
-        var allGrids = new FilteredElementCollector(document, document.ActiveView.Id)
-            .OfClass(typeof(Grid))
-            .OfType<Grid>()
-            .ToList();
-
-        if (allGrids.Count == 0)
-            allGrids = new FilteredElementCollector(document)
-                .OfClass(typeof(Grid))
-                .OfType<Grid>()
-                .ToList();
-
-        return allGrids;
+        catch
+        {
+            return null;
+        }
     }
+
+    private const double OneMmInFt = 0.00328084;
 }

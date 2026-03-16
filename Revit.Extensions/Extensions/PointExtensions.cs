@@ -32,4 +32,24 @@ public static class PointExtensions
         return new(x, y, z);
     }
 #endif
+
+    /// <summary>
+    /// Converts an <see cref="XYZ"/> point from Revit internal units (feet) to millimeters
+    /// without requiring <c>UnitUtils</c> — works headless.
+    /// </summary>
+    public static XYZ ToMillimeters(this XYZ point) =>
+        new XYZ(
+            point.X.FeetToMillimeters(),
+            point.Y.FeetToMillimeters(),
+            point.Z.FeetToMillimeters());
+
+    /// <summary>
+    /// Converts an <see cref="XYZ"/> point from millimeters to Revit internal units (feet)
+    /// without requiring <c>UnitUtils</c> — works headless.
+    /// </summary>
+    public static XYZ FromMillimeters(this XYZ point) =>
+        new XYZ(
+            point.X.MillimetersToFeet(),
+            point.Y.MillimetersToFeet(),
+            point.Z.MillimetersToFeet());
 }

@@ -96,3 +96,76 @@ Example in `PointExtensions.cs`:
 - `PointExtensions` tests require a live Revit process — marked `[Fact(Skip = ...)]`.
 - `ElementExtensions` tests require `Document`/`UIDocument` — use Moq or test inside Revit.
 - Revit API package: `Revit_All_Main_Versions_API_x64` from nuget.org, versioned by `$(RevitVersion).*`.
+
+## DrawSession — transient geometry via DirectContext3D
+
+`DrawSession` renders geometry directly into the Revit graphics pipeline without creating model elements and without requiring a `Transaction`.
+
+### Registration (critical)
+
+Registration **must** happen in `IExternalApplication.OnStartup` using `RegisterDrawSession()`:
+
+```csharp
+// App.cs
+public static DrawSession? ActiveDrawSession { get; private set; }
+
+public Result OnStartup(UIControlledApplication application)
+{
+    ActiveDrawSession = application.RegisterDrawSession(); // one line
+    // ...
+}
+
+public Result OnShutdown(UIControlledApplication application)
+{
+    ActiveDrawSession?.Dispose();
+    ActiveDrawSession = null;
+    return Result.Succeeded;
+}
+```
+
+`RegisterDrawSession()` is an extension on `UIControlledApplication` in `UIControlledApplicationExtensions.cs`. Internally it:
+1. Calls `service.AddServer(session)` first
+2. Calls `service.GetActiveServerIds()` **after** AddServer (per Revit API docs)
+3. Checks `Contains` before adding to avoid duplicates
+
+`DrawSession` does **NOT** auto-register in its constructor — registration must be explicit.
+
+### UIApplication for view refresh
+
+`DrawSession` needs `UIApplication` to call `RefreshActiveView()` after drawing. Supply it via `SetUIApplication()` from the first command:
+
+```csharp
+App.ActiveDrawSession?.SetUIApplication(commandData.Application);
+```
+
+### Fluent drawing API
+
+```csharp
+session
+    .DrawLine(from, to, DrawExtensions.Blue)
+    .DrawCross(center, radius: 0.5, DrawExtensions.Red)
+    .DrawPoint(center, radius: 0.3, DrawExtensions.Green)
+    .DrawPolygon(new[] { p0, p1, p2 }, DrawExtensions.Orange)
+    .DrawBoundingBox(bbox, DrawExtensions.Cyan);
+
+session.Clear(); // remove all geometry (session stays registered)
+session.Dispose(); // unregister and release GPU buffers
+```
+
+### Known bugs fixed
+
+- `VertexBuffer.Map(0)` and `IndexBuffer.Map(0)` — `Map()` takes **size in floats/shorts**, not an offset. Passing 0 maps nothing → no vertices written → geometry invisible. Fixed to pass actual buffer sizes.
+- Auto-registration in constructor caused double-registration when App.cs also registered manually. Removed auto-registration; use `RegisterDrawSession()` instead.
+
+### CanExecute conditions
+
+`DrawSession.CanExecute(view)` returns `true` only when:
+- Session is not disposed
+- At least one line has been added (`_lines.Count > 0`)
+- The view is a `View3D`
+
+### Threading
+
+- `_lines` list and `Invalidate()` → main/UI thread only
+- `GetBoundingBox()` → may be called from render thread → reads `_cachedOutline` (volatile)
+- `RenderScene()` → render thread → calls `RebuildBuffers()` when `_isDirty`
