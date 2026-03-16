@@ -48,6 +48,12 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     // main-thread affinity and must NOT be called from the render thread.
     private readonly List<(byte R, byte G, byte B, double Transparency, List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)> Tris)> _triData = new();
 
+    // Cache of normalised glyph triangles: key=(text, fontFamily),
+    // value=list of (x0,y0, x1,y1, x2,y2) in font-height-normalised coords (height=1.0, Y-up).
+    // Populated on the main thread in DrawText; safe to read from the same thread thereafter.
+    private static readonly Dictionary<(string, string), List<(float, float, float, float, float, float)>>
+        _textCache = new Dictionary<(string, string), List<(float, float, float, float, float, float)>>();
+
     // -------------------------------------------------------------------------
     // GPU buffers  (rebuilt on render thread when _isDirty is true)
     // -------------------------------------------------------------------------
@@ -130,6 +136,27 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     /// <summary>Draws a point marker (3-axis cross) at <paramref name="point"/>.</summary>
     public DrawSession DrawPoint(XYZ point, double radius = 0.328084, Color? color = null) =>
         DrawCross(point, radius, color);
+
+    /// <summary>
+    /// Draws a point marker (3-axis cross) with a text label next to it.
+    /// </summary>
+    /// <param name="point">Point position in world space.</param>
+    /// <param name="label">Text label to display next to the point.</param>
+    /// <param name="radius">Cross half-size in Revit internal units (feet). Default ≈ 0.1 m.</param>
+    /// <param name="color">Color for both cross and label. Defaults to <see cref="DrawExtensions.DarkBlue"/>.</param>
+    /// <param name="normal">
+    /// Face normal that defines the plane in which the label lies.
+    /// <c>null</c> defaults to <see cref="XYZ.BasisZ"/> (XY plane, horizontal text).
+    /// </param>
+    public DrawSession DrawPoint(XYZ point, string label, double radius = 0.328084,
+        Color? color = null, XYZ? normal = null)
+    {
+        DrawCross(point, radius, color);
+        double textHeight = radius * 2.5;
+        var (right, up) = ComputeTextFrame((normal ?? XYZ.BasisZ).Normalize());
+        XYZ textOrigin = point + right * (radius * 1.5) + up * (-textHeight * 0.5);
+        return DrawText(label, textOrigin, textHeight, color, normal: normal);
+    }
 
     /// <summary>Draws <paramref name="points"/> as a closed polygon.</summary>
     public DrawSession DrawPolygon(IEnumerable<XYZ> points, Color? color = null)
@@ -313,6 +340,67 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         if (edgeColor != null)
             AppendSphereEdges(center, radius, ec);
 
+        Invalidate();
+        return this;
+    }
+
+    /// <summary>
+    /// Draws <paramref name="text"/> as filled triangles tessellated from a real system font.
+    /// </summary>
+    /// <remarks>
+    /// Uses <c>System.Drawing.GraphicsPath</c> to extract glyph outlines from the specified
+    /// font, then <c>LibTessDotNet</c> (EvenOdd winding) to tessellate them into triangles —
+    /// correctly handling inner holes in letters like O, A, B, D, Р, О, etc.
+    /// Results are cached per <c>(text, fontFamily)</c> so repeated calls are cheap.
+    /// </remarks>
+    /// <param name="text">Text to render. Any Unicode characters supported by the font.</param>
+    /// <param name="origin">Bottom-left corner of the first character (world space).</param>
+    /// <param name="height">Character height in Revit internal units (feet). Default 0.5 ft ≈ 15 cm.</param>
+    /// <param name="color">Fill color. Defaults to <see cref="DrawExtensions.DarkBlue"/>.</param>
+    /// <param name="fontFamily">
+    /// System font family name (e.g. "Arial", "Times New Roman", "Consolas").
+    /// Falls back to generic sans-serif if the font is not installed.
+    /// </param>
+    /// <param name="transparency">Transparency 0.0 (opaque) – 1.0 (invisible).</param>
+    /// <param name="normal">
+    /// Face normal of the plane in which the text lies.
+    /// <c>null</c> defaults to <see cref="XYZ.BasisZ"/> (XY plane, horizontal text).
+    /// The local X/Y axes are computed automatically via <see cref="ComputeTextFrame"/>.
+    /// </param>
+    public DrawSession DrawText(string text, XYZ origin,
+        double height = 0.5,
+        Color? color = null,
+        string fontFamily = "Arial",
+        double transparency = 0.0,
+        XYZ? normal = null)
+    {
+        if (string.IsNullOrEmpty(text) || height <= 0) return this;
+
+        var cacheKey = (text, fontFamily);
+        if (!_textCache.TryGetValue(cacheKey, out var normalized))
+        {
+            try   { normalized = BuildTextTriangles(text, fontFamily); }
+            catch { normalized = new List<(float, float, float, float, float, float)>(); }
+            _textCache[cacheKey] = normalized;
+        }
+        if (normalized.Count == 0) return this;
+
+        Color c = color ?? DrawExtensions.DarkBlue;
+        double t = transparency < 0.0 ? 0.0 : transparency > 1.0 ? 1.0 : transparency;
+
+        XYZ n = (normal ?? XYZ.BasisZ).Normalize();
+        var (right, up) = ComputeTextFrame(n);
+
+        var tris = new List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)>(normalized.Count);
+        foreach (var (x0, y0, x1, y1, x2, y2) in normalized)
+        {
+            tris.Add((
+                origin + right * (x0 * height) + up * (y0 * height),
+                origin + right * (x1 * height) + up * (y1 * height),
+                origin + right * (x2 * height) + up * (y2 * height),
+                n));
+        }
+        _triData.Add((c.Red, c.Green, c.Blue, t, tris));
         Invalidate();
         return this;
     }
@@ -770,6 +858,161 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
                 center + new XYZ(0, Math.Cos(a1) * radius, Math.Sin(a1) * radius),
                 r, g, b));
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Text tessellation helpers
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Computes a local right/up frame for text rendering given a face <paramref name="normal"/>.
+    /// <list type="bullet">
+    ///   <item>Horizontal surfaces (<paramref name="normal"/> ≈ ±Z): uses world X/Y.</item>
+    ///   <item>All other normals: <c>up</c> is the world-Z direction projected onto the plane;
+    ///         <c>right</c> is derived via <c>BasisZ × normal</c>.</item>
+    /// </list>
+    /// </summary>
+    private static (XYZ Right, XYZ Up) ComputeTextFrame(XYZ n)
+    {
+        if (Math.Abs(n.DotProduct(XYZ.BasisZ)) > 0.99)
+            return (XYZ.BasisX, XYZ.BasisY);   // horizontal surface — keep standard XY orientation
+
+        // Project world Z onto the plane to get "up", then derive "right"
+        XYZ right = XYZ.BasisZ.CrossProduct(n).Normalize();
+        XYZ up    = n.CrossProduct(right).Normalize();
+        return (right, up);
+    }
+
+    /// <summary>
+    /// Builds a list of normalised triangles for <paramref name="text"/> using a real system
+    /// font.  Coordinates are in font-height space: character height = 1.0, Y-up, X origin at
+    /// the left edge of the first glyph.  Results are suitable for caching in
+    /// <see cref="_textCache"/>.
+    /// </summary>
+    private static List<(float, float, float, float, float, float)> BuildTextTriangles(
+        string text, string fontFamily)
+    {
+        const float RefSize = 100f;
+        var contours = new List<List<System.Drawing.PointF>>();
+
+        using (var gdiFamily = GetFontFamily(fontFamily))
+        using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+        {
+            path.AddString(text, gdiFamily, (int)System.Drawing.FontStyle.Regular,
+                RefSize, System.Drawing.PointF.Empty,
+                System.Drawing.StringFormat.GenericTypographic);
+            path.Flatten(null, 0.5f);
+            ExtractContours(path, contours);
+        }
+
+        if (contours.Count == 0)
+            return new List<(float, float, float, float, float, float)>();
+
+        // Bounding box of all contour points (GDI+ Y-down coordinate space)
+        float minX = float.MaxValue, maxX = float.MinValue;
+        float minY = float.MaxValue, maxY = float.MinValue;
+        foreach (var contour in contours)
+            foreach (var pt in contour)
+            {
+                if (pt.X < minX) minX = pt.X;
+                if (pt.X > maxX) maxX = pt.X;
+                if (pt.Y < minY) minY = pt.Y;
+                if (pt.Y > maxY) maxY = pt.Y;
+            }
+
+        float h = maxY - minY;
+        if (h < 1e-6f)
+            return new List<(float, float, float, float, float, float)>();
+        float invH = 1.0f / h;
+
+        // Feed contours to LibTessDotNet with EvenOdd winding.
+        // EvenOdd correctly handles glyph holes (letters O, A, B, D, Р, О, etc.).
+        var tess = new LibTessDotNet.Tess();
+        foreach (var contour in contours)
+        {
+            if (contour.Count < 3) continue;
+            var verts = new LibTessDotNet.ContourVertex[contour.Count];
+            for (int i = 0; i < contour.Count; i++)
+            {
+                // Normalise to height=1.0 and flip Y (GDI+ Y-down → Revit Y-up)
+                float nx = (contour[i].X - minX) * invH;
+                float ny = (maxY - contour[i].Y) * invH;
+                verts[i] = new LibTessDotNet.ContourVertex
+                {
+                    Position = new LibTessDotNet.Vec3 { X = nx, Y = ny, Z = 0 }
+                };
+            }
+            tess.AddContour(verts, LibTessDotNet.ContourOrientation.Original);
+        }
+
+        tess.Tessellate(LibTessDotNet.WindingRule.EvenOdd,
+            LibTessDotNet.ElementType.Polygons, 3);
+
+        var result = new List<(float, float, float, float, float, float)>(tess.ElementCount);
+        for (int i = 0; i < tess.ElementCount; i++)
+        {
+            int i0 = tess.Elements[i * 3];
+            int i1 = tess.Elements[i * 3 + 1];
+            int i2 = tess.Elements[i * 3 + 2];
+            if (i0 < 0 || i1 < 0 || i2 < 0) continue;
+            var p0 = tess.Vertices[i0].Position;
+            var p1 = tess.Vertices[i1].Position;
+            var p2 = tess.Vertices[i2].Position;
+            result.Add((p0.X, p0.Y, p1.X, p1.Y, p2.X, p2.Y));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Parses <see cref="System.Drawing.Drawing2D.GraphicsPath"/> path data into a list of
+    /// polyline contours.  Each sub-path (delimited by <c>PathPointType.Start</c> points or
+    /// <c>CloseSubpath</c> flags) becomes one entry in <paramref name="contours"/>.
+    /// </summary>
+    private static void ExtractContours(
+        System.Drawing.Drawing2D.GraphicsPath path,
+        List<List<System.Drawing.PointF>> contours)
+    {
+        var points = path.PathPoints;
+        var types  = path.PathTypes;
+        if (points == null || points.Length == 0) return;
+
+        List<System.Drawing.PointF>? current = null;
+        for (int i = 0; i < points.Length; i++)
+        {
+            byte baseType = (byte)(types[i] & 0x07);
+            if (baseType == 0 || current == null) // PathPointType.Start
+            {
+                current = new List<System.Drawing.PointF>();
+                contours.Add(current);
+            }
+
+            current.Add(points[i]);
+
+            // CloseSubpath flag (0x80) — next point starts a fresh contour
+            if ((types[i] & 0x80) != 0)
+                current = null;
+        }
+    }
+
+    /// <summary>
+    /// Returns a <see cref="System.Drawing.FontFamily"/> for <paramref name="name"/>,
+    /// falling back to Arial and then the generic sans-serif family if the requested
+    /// font is not installed.  The caller is responsible for disposing the returned instance.
+    /// </summary>
+    private static System.Drawing.FontFamily GetFontFamily(string name)
+    {
+        try
+        {
+            var family = new System.Drawing.FontFamily(name);
+            if (family.IsStyleAvailable(System.Drawing.FontStyle.Regular))
+                return family;
+            family.Dispose();
+        }
+        catch { }
+
+        try { return new System.Drawing.FontFamily("Arial"); } catch { }
+        return new System.Drawing.FontFamily(
+            System.Drawing.Text.GenericFontFamilies.SansSerif);
     }
 
     private void RegisterImpl()
