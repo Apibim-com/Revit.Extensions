@@ -43,11 +43,10 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
     private readonly List<(XYZ From, XYZ To, byte R, byte G, byte B)> _lines = new();
 
-    // Solid: face color + transparency + edge color stored together.
-    private readonly List<(Solid Solid, byte FR, byte FG, byte FB, double Transparency, byte ER, byte EG, byte EB)> _solids = new();
-
-    // Mesh: triangulated surface, flat-shaded.
-    private readonly List<(Mesh Mesh, byte R, byte G, byte B)> _meshes = new();
+    // Pre-computed triangle data — populated on the main thread inside DrawSolid/DrawMesh.
+    // Revit geometry API (face.Triangulate, face.ComputeNormal, mesh.get_Triangle) has
+    // main-thread affinity and must NOT be called from the render thread.
+    private readonly List<(byte R, byte G, byte B, double Transparency, List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)> Tris)> _triData = new();
 
     // -------------------------------------------------------------------------
     // GPU buffers  (rebuilt on render thread when _isDirty is true)
@@ -141,13 +140,13 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         return this;
     }
 
-    /// <summary>Draws the 12 edges of <paramref name="bbox"/>.</summary>
+    /// <summary>Draws the 12 edges of <paramref name="bbox"/> (wireframe only).</summary>
     public DrawSession DrawBoundingBox(BoundingBoxXYZ bbox, Color? color = null) =>
-        DrawBox(bbox.ComputeVertices(), color);
+        DrawWireBox(bbox.ComputeVertices(), color);
 
-    /// <summary>Draws the 12 edges of <paramref name="outline"/>.</summary>
+    /// <summary>Draws the 12 edges of <paramref name="outline"/> (wireframe only).</summary>
     public DrawSession DrawBoundingBox(Outline outline, Color? color = null) =>
-        DrawBox(outline.ComputeVertices(), color);
+        DrawWireBox(outline.ComputeVertices(), color);
 
     // -------------------------------------------------------------------------
     // Fluent drawing API — solids & meshes  (call from main / UI thread)
@@ -155,7 +154,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
     /// <summary>
     /// Draws a <see cref="Solid"/> with shaded faces and tessellated edges.
-    /// Faces are rendered as <c>PositionNormal</c> triangles; edges as lines.
+    /// Faces are rendered as <c>PositionNormalColored</c> triangles; edges as lines.
     /// </summary>
     /// <param name="solid">The solid to render.</param>
     /// <param name="faceColor">Face fill color. Defaults to <see cref="DrawExtensions.Blue"/>.</param>
@@ -170,9 +169,25 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
         Color fc = faceColor ?? DrawExtensions.Blue;
         Color ec = edgeColor ?? DrawExtensions.DarkBlue;
-        _solids.Add((solid, fc.Red, fc.Green, fc.Blue,
-                     transparency < 0.0 ? 0.0 : transparency > 1.0 ? 1.0 : transparency,
-                     ec.Red, ec.Green, ec.Blue));
+        double t = transparency < 0.0 ? 0.0 : transparency > 1.0 ? 1.0 : transparency;
+
+        // Pre-compute face triangles HERE on the main thread.
+        // Revit geometry API (Triangulate, ComputeNormal) has main-thread affinity —
+        // calling it from the render thread (RebuildBuffers) returns garbage silently,
+        // producing zero-length normals and black faces.
+        var tris = new List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)>();
+        foreach (Face face in solid.Faces)
+        {
+            try
+            {
+                Mesh m = face.Triangulate();
+                if (m == null) continue;
+                AppendFaceTriangles(face, m, tris);
+            }
+            catch { }
+        }
+        if (tris.Count > 0)
+            _triData.Add((fc.Red, fc.Green, fc.Blue, t, tris));
 
         // Tessellate edges as lines — they share the line buffer pipeline.
         foreach (Edge edge in solid.Edges)
@@ -197,7 +212,107 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         if (mesh is null || mesh.NumTriangles == 0) return this;
 
         Color c = color ?? DrawExtensions.Blue;
-        _meshes.Add((mesh, c.Red, c.Green, c.Blue));
+
+        // Pre-compute triangles on the main thread — same reason as DrawSolid.
+        var tris = new List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)>();
+        AppendMeshTriangles(mesh, tris);
+        if (tris.Count > 0)
+            _triData.Add((c.Red, c.Green, c.Blue, 0.0, tris));
+
+        Invalidate();
+        return this;
+    }
+
+    /// <summary>
+    /// Draws a filled axis-aligned box defined by <paramref name="min"/> and <paramref name="max"/> corners.
+    /// </summary>
+    /// <param name="min">Minimum corner (world space).</param>
+    /// <param name="max">Maximum corner (world space).</param>
+    /// <param name="faceColor">Face fill color. Defaults to <see cref="DrawExtensions.Blue"/>.</param>
+    /// <param name="edgeColor">Edge line color. Defaults to <see cref="DrawExtensions.DarkBlue"/>.</param>
+    /// <param name="transparency">Face transparency 0.0 (opaque) – 1.0 (invisible).</param>
+    public DrawSession DrawBox(XYZ min, XYZ max,
+        Color? faceColor = null,
+        Color? edgeColor = null,
+        double transparency = 0.0)
+    {
+        Color fc = faceColor ?? DrawExtensions.Blue;
+        Color ec = edgeColor ?? DrawExtensions.DarkBlue;
+        double t = transparency < 0.0 ? 0.0 : transparency > 1.0 ? 1.0 : transparency;
+
+        var tris = new List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)>();
+        AppendBoxTriangles(min, max, tris);
+        if (tris.Count > 0)
+            _triData.Add((fc.Red, fc.Green, fc.Blue, t, tris));
+
+        // 12 wireframe edges
+        XYZ v0 = min,                            v1 = new XYZ(min.X, max.Y, min.Z);
+        XYZ v2 = new XYZ(max.X, max.Y, min.Z),  v3 = new XYZ(max.X, min.Y, min.Z);
+        XYZ v4 = new XYZ(min.X, min.Y, max.Z),  v5 = new XYZ(min.X, max.Y, max.Z);
+        XYZ v6 = max,                            v7 = new XYZ(max.X, min.Y, max.Z);
+        byte er = ec.Red, eg = ec.Green, eb = ec.Blue;
+        _lines.Add((v0, v1, er, eg, eb)); _lines.Add((v1, v2, er, eg, eb));
+        _lines.Add((v2, v3, er, eg, eb)); _lines.Add((v3, v0, er, eg, eb));
+        _lines.Add((v4, v5, er, eg, eb)); _lines.Add((v5, v6, er, eg, eb));
+        _lines.Add((v6, v7, er, eg, eb)); _lines.Add((v7, v4, er, eg, eb));
+        _lines.Add((v0, v4, er, eg, eb)); _lines.Add((v1, v5, er, eg, eb));
+        _lines.Add((v2, v6, er, eg, eb)); _lines.Add((v3, v7, er, eg, eb));
+
+        Invalidate();
+        return this;
+    }
+
+    /// <summary>
+    /// Draws a filled box from a <see cref="BoundingBoxXYZ"/>.
+    /// Uses <see cref="BoundingBoxXYZ.Min"/> and <see cref="BoundingBoxXYZ.Max"/> directly
+    /// (same convention as <see cref="DrawBoundingBox(BoundingBoxXYZ,Color?)"/>).
+    /// </summary>
+    public DrawSession DrawBox(BoundingBoxXYZ bbox,
+        Color? faceColor = null,
+        Color? edgeColor = null,
+        double transparency = 0.0) =>
+        DrawBox(bbox.Min, bbox.Max, faceColor, edgeColor, transparency);
+
+    /// <summary>
+    /// Draws a filled box from an <see cref="Outline"/>.
+    /// </summary>
+    public DrawSession DrawBox(Outline outline,
+        Color? faceColor = null,
+        Color? edgeColor = null,
+        double transparency = 0.0) =>
+        DrawBox(outline.MinimumPoint, outline.MaximumPoint, faceColor, edgeColor, transparency);
+
+    /// <summary>
+    /// Draws a filled UV sphere centred at <paramref name="center"/> with the given <paramref name="radius"/>.
+    /// </summary>
+    /// <param name="center">Sphere centre (world space).</param>
+    /// <param name="radius">Sphere radius (Revit internal units — feet).</param>
+    /// <param name="faceColor">Face fill color. Defaults to <see cref="DrawExtensions.Blue"/>.</param>
+    /// <param name="edgeColor">
+    /// Color of the three great-circle edge lines (XY / XZ / YZ planes).
+    /// Pass <c>null</c> to skip edges.
+    /// </param>
+    /// <param name="transparency">Face transparency 0.0 (opaque) – 1.0 (invisible).</param>
+    public DrawSession DrawSphere(XYZ center, double radius,
+        Color? faceColor = null,
+        Color? edgeColor = null,
+        double transparency = 0.0)
+    {
+        if (radius <= 0) return this;
+
+        Color fc = faceColor ?? DrawExtensions.Blue;
+        Color ec = edgeColor ?? DrawExtensions.DarkBlue;
+        double t = transparency < 0.0 ? 0.0 : transparency > 1.0 ? 1.0 : transparency;
+
+        var tris = new List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)>();
+        AppendSphereTriangles(center, radius, tris);
+        if (tris.Count > 0)
+            _triData.Add((fc.Red, fc.Green, fc.Blue, t, tris));
+
+        // Three great circles as wireframe edges
+        if (edgeColor != null)
+            AppendSphereEdges(center, radius, ec);
+
         Invalidate();
         return this;
     }
@@ -210,8 +325,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     public DrawSession Clear()
     {
         _lines.Clear();
-        _solids.Clear();
-        _meshes.Clear();
+        _triData.Clear();
         Invalidate();
         return this;
     }
@@ -234,7 +348,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
     public bool CanExecute(View view) =>
         !_disposed
-        && (_lines.Count > 0 || _solids.Count > 0 || _meshes.Count > 0)
+        && (_lines.Count > 0 || _triData.Count > 0)
         && view is View3D;
 
     /// <summary>
@@ -245,7 +359,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
     /// <summary>
     /// Called from the render thread — returns a pre-computed outline.
-    /// Never access <c>_lines</c> / <c>_solids</c> / <c>_meshes</c> here.
+    /// Never access <c>_lines</c> / <c>_triData</c> here (main-thread data).
     /// </summary>
     public Outline? GetBoundingBox(View view) => _cachedOutline;
 
@@ -278,7 +392,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
                 foreach (var (vb, vbCount, ib, ibCount, primCount, r, g, b, transp) in _triBuffers)
                 {
                     if (transp > 0.0) continue;
-                    FlushTriangleBuffer(vb, vbCount, ib, ibCount, primCount, r, g, b, 0.0);
+                    FlushTriangleBuffer(vb, vbCount, ib, ibCount, primCount, r, g, b, 0.0, displayStyle);
                 }
             }
             else
@@ -287,7 +401,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
                 foreach (var (vb, vbCount, ib, ibCount, primCount, r, g, b, transp) in _triBuffers)
                 {
                     if (transp <= 0.0) continue;
-                    FlushTriangleBuffer(vb, vbCount, ib, ibCount, primCount, r, g, b, transp);
+                    FlushTriangleBuffer(vb, vbCount, ib, ibCount, primCount, r, g, b, transp, displayStyle);
                 }
             }
         }
@@ -304,21 +418,27 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     private static void FlushTriangleBuffer(
         VertexBuffer vb, int vbCount,
         IndexBuffer ib, int ibCount, int primCount,
-        byte r, byte g, byte b, double transparency)
+        byte r, byte g, byte b, double transparency,
+        DisplayStyle displayStyle)
     {
-        using var fmt = new VertexFormat(VertexFormatBits.PositionNormal);
-        using var eff = new EffectInstance(VertexFormatBits.PositionNormal);
+        using var fmt = new VertexFormat(VertexFormatBits.PositionNormalColored);
+        using var eff = new EffectInstance(VertexFormatBits.PositionNormalColored);
         var color = new Color(r, g, b);
         eff.SetColor(color);
-        eff.SetAmbientColor(color);
         eff.SetDiffuseColor(color);
         eff.SetTransparency(transparency);
+        if (displayStyle == DisplayStyle.HLR)
+        {
+            eff.SetSpecularColor(color);
+            eff.SetAmbientColor(color);
+            eff.SetEmissiveColor(color);
+        }
         DrawContext.FlushBuffer(
             vb, vbCount, ib, ibCount, fmt, eff,
             PrimitiveType.TriangleList, 0, primCount);
     }
 
-    private DrawSession DrawBox(XYZ[] v, Color? color)
+    private DrawSession DrawWireBox(XYZ[] v, Color? color)
     {
         DrawPolygon(new[] { v[0], v[1], v[2], v[3] }, color);
         DrawPolygon(new[] { v[4], v[5], v[6], v[7] }, color);
@@ -335,7 +455,7 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
     private void Invalidate()
     {
         _cachedOutline = ComputeOutline();
-        _hasTransparency = _solids.Any(s => s.Transparency > 0.0);
+        _hasTransparency = _triData.Any(t => t.Transparency > 0.0);
         _isDirty = true;
         _uiApp?.ActiveUIDocument?.RefreshActiveView();
     }
@@ -364,23 +484,14 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
             Include(to);
         }
 
-        foreach (var (solid, _, _, _, _, _, _, _) in _solids)
+        foreach (var (_, _, _, _, tris) in _triData)
         {
-            try
+            foreach (var (v0, v1, v2, _) in tris)
             {
-                foreach (Face face in solid.Faces)
-                {
-                    Mesh m = face.Triangulate();
-                    if (m == null) continue;
-                    foreach (XYZ v in m.Vertices) Include(v);
-                }
+                Include(v0);
+                Include(v1);
+                Include(v2);
             }
-            catch { }
-        }
-
-        foreach (var (mesh, _, _, _) in _meshes)
-        {
-            foreach (XYZ v in mesh.Vertices) Include(v);
         }
 
         if (!any) return null;
@@ -441,34 +552,16 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
         // ---- Triangle buffers (solid faces + meshes) ----
         // Key: (R, G, B, Transparency) — group to minimise FlushBuffer calls.
+        // Triangle data was pre-computed on the main thread in DrawSolid/DrawMesh —
+        // no Revit geometry API calls needed here (render-thread safe).
         var triGroups = new Dictionary<(byte R, byte G, byte B, double T), List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)>>();
 
-        // Collect solid face triangles
-        foreach (var (solid, fr, fg, fb, transp, _, _, _) in _solids)
+        foreach (var (r, g, b, transp, tris) in _triData)
         {
-            var key = (fr, fg, fb, transp);
-            if (!triGroups.TryGetValue(key, out var tris))
-                triGroups[key] = tris = new();
-
-            try
-            {
-                foreach (Face face in solid.Faces)
-                {
-                    Mesh m = face.Triangulate();
-                    if (m == null) continue;
-                    AppendMeshTriangles(m, tris);
-                }
-            }
-            catch { }
-        }
-
-        // Collect mesh triangles
-        foreach (var (mesh, r, g, b) in _meshes)
-        {
-            var key = (r, g, b, 0.0);
-            if (!triGroups.TryGetValue(key, out var tris))
-                triGroups[key] = tris = new();
-            AppendMeshTriangles(mesh, tris);
+            var key = (r, g, b, transp);
+            if (!triGroups.TryGetValue(key, out var group))
+                triGroups[key] = group = new();
+            group.AddRange(tris);
         }
 
 #if REVIT_2024 || REVIT_2023 || REVIT_2022 || REVIT_2021 || REVIT_2020
@@ -484,17 +577,22 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
 
             int nVerts = tris.Count * 3;
             int nPrims = tris.Count;
-            int vbSize = nVerts * VertexPositionNormal.GetSizeInFloats();
+            int vbSize = nVerts * VertexPositionNormalColored.GetSizeInFloats();
             int ibSize = nPrims * IndexTriangle.GetSizeInShortInts();
+
+            // Color is embedded per-vertex — required for PositionNormalColored format.
+            var vertColor = new ColorWithTransparency(
+                tKey.R, tKey.G, tKey.B,
+                (uint)(tKey.T * 255));
 
             var vb = new VertexBuffer(vbSize);
             vb.Map(vbSize);
-            var vs = vb.GetVertexStreamPositionNormal();
+            var vs = vb.GetVertexStreamPositionNormalColored();
             foreach (var (v0, v1, v2, n) in tris)
             {
-                vs.AddVertex(new VertexPositionNormal(v0, n));
-                vs.AddVertex(new VertexPositionNormal(v1, n));
-                vs.AddVertex(new VertexPositionNormal(v2, n));
+                vs.AddVertex(new VertexPositionNormalColored(v0, n, vertColor));
+                vs.AddVertex(new VertexPositionNormalColored(v1, n, vertColor));
+                vs.AddVertex(new VertexPositionNormalColored(v2, n, vertColor));
             }
             vb.Unmap();
 
@@ -511,7 +609,54 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
         _isDirty = false;
     }
 
-    /// <summary>Tessellates a <see cref="Mesh"/> into flat-shaded triangles.</summary>
+    /// <summary>
+    /// Appends triangles from a solid <see cref="Face"/> tessellation.
+    /// Computes a reference outward normal via <see cref="Face.ComputeNormal"/> at the
+    /// face UV centroid, then flips each triangle's computed normal if it points inward.
+    /// This is necessary because Revit's tessellation winding order is not guaranteed
+    /// to produce outward-facing normals.
+    /// </summary>
+    private static void AppendFaceTriangles(
+        Face face,
+        Mesh mesh,
+        List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)> tris)
+    {
+        // Compute a reference outward normal at the face UV centroid.
+        XYZ? faceRef = null;
+        try
+        {
+            BoundingBoxUV uvBox = face.GetBoundingBox();
+            UV centerUV = new UV(
+                (uvBox.Min.U + uvBox.Max.U) / 2.0,
+                (uvBox.Min.V + uvBox.Max.V) / 2.0);
+            faceRef = face.ComputeNormal(centerUV);
+        }
+        catch { }
+
+        for (int i = 0; i < mesh.NumTriangles; i++)
+        {
+            MeshTriangle tri = mesh.get_Triangle(i);
+            XYZ v0 = tri.get_Vertex(0);
+            XYZ v1 = tri.get_Vertex(1);
+            XYZ v2 = tri.get_Vertex(2);
+
+            XYZ cross = (v1 - v0).CrossProduct(v2 - v0);
+            if (cross.GetLength() < 1e-10) continue;
+
+            XYZ normal = cross.Normalize();
+
+            // If we have a reference normal, ensure triangle normal agrees with it.
+            if (faceRef != null && normal.DotProduct(faceRef) < 0)
+                normal = normal.Negate();
+
+            tris.Add((v0, v1, v2, normal));
+        }
+    }
+
+    /// <summary>
+    /// Appends triangles from a standalone <see cref="Mesh"/> using flat normals
+    /// computed from the cross product of each triangle's edges.
+    /// </summary>
     private static void AppendMeshTriangles(
         Mesh mesh,
         List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)> tris)
@@ -523,12 +668,107 @@ public sealed class DrawSession : IDirectContext3DServer, IDisposable
             XYZ v1 = tri.get_Vertex(1);
             XYZ v2 = tri.get_Vertex(2);
 
-            XYZ edge1 = v1 - v0;
-            XYZ edge2 = v2 - v0;
-            XYZ cross = edge1.CrossProduct(edge2);
-
-            if (cross.GetLength() < 1e-10) continue; // degenerate triangle
+            XYZ cross = (v1 - v0).CrossProduct(v2 - v0);
+            if (cross.GetLength() < 1e-10) continue;
             tris.Add((v0, v1, v2, cross.Normalize()));
+        }
+    }
+
+    /// <summary>
+    /// Generates 12 triangles (6 quad-faces × 2) for an axis-aligned box.
+    /// Normals are the axis-unit vectors — no Revit API calls required.
+    /// </summary>
+    private static void AppendBoxTriangles(XYZ min, XYZ max,
+        List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)> tris)
+    {
+        XYZ v0 = min,                            v1 = new XYZ(min.X, max.Y, min.Z);
+        XYZ v2 = new XYZ(max.X, max.Y, min.Z),  v3 = new XYZ(max.X, min.Y, min.Z);
+        XYZ v4 = new XYZ(min.X, min.Y, max.Z),  v5 = new XYZ(min.X, max.Y, max.Z);
+        XYZ v6 = max,                            v7 = new XYZ(max.X, min.Y, max.Z);
+
+        void AddQuad(XYZ a, XYZ b, XYZ c, XYZ d, XYZ n)
+        {
+            tris.Add((a, b, c, n));
+            tris.Add((a, c, d, n));
+        }
+
+        AddQuad(v0, v1, v2, v3, -XYZ.BasisZ); // bottom
+        AddQuad(v4, v7, v6, v5,  XYZ.BasisZ); // top
+        AddQuad(v0, v3, v7, v4, -XYZ.BasisY); // front
+        AddQuad(v1, v5, v6, v2,  XYZ.BasisY); // back
+        AddQuad(v0, v4, v5, v1, -XYZ.BasisX); // left
+        AddQuad(v3, v2, v6, v7,  XYZ.BasisX); // right
+    }
+
+    /// <summary>
+    /// Generates triangles for a UV sphere with 16 latitude × 32 longitude rings.
+    /// Per-vertex normals are the unit direction from <paramref name="center"/> to the vertex.
+    /// </summary>
+    private static void AppendSphereTriangles(XYZ center, double radius,
+        List<(XYZ V0, XYZ V1, XYZ V2, XYZ Normal)> tris)
+    {
+        const int latSegs = 16;
+        const int lonSegs = 32;
+
+        XYZ UnitPt(double theta, double phi) =>
+            new XYZ(
+                Math.Sin(theta) * Math.Cos(phi),
+                Math.Sin(theta) * Math.Sin(phi),
+                Math.Cos(theta));
+
+        for (int i = 0; i < latSegs; i++)
+        {
+            double t0 = Math.PI * i / latSegs;
+            double t1 = Math.PI * (i + 1) / latSegs;
+
+            for (int j = 0; j < lonSegs; j++)
+            {
+                double p0 = 2.0 * Math.PI * j / lonSegs;
+                double p1 = 2.0 * Math.PI * (j + 1) / lonSegs;
+
+                XYZ n00 = UnitPt(t0, p0), n01 = UnitPt(t0, p1);
+                XYZ n10 = UnitPt(t1, p0), n11 = UnitPt(t1, p1);
+                XYZ v00 = center + n00 * radius, v01 = center + n01 * radius;
+                XYZ v10 = center + n10 * radius, v11 = center + n11 * radius;
+
+                // Upper triangle (skip at north pole where v00==v01)
+                if (i > 0)
+                    tris.Add((v00, v10, v11, (n00 + n10 + n11).Normalize()));
+                // Lower triangle (skip at south pole where v10==v11)
+                if (i < latSegs - 1)
+                    tris.Add((v00, v11, v01, (n00 + n11 + n01).Normalize()));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Appends three great-circle edge rings (XY, XZ, YZ planes) as line segments.
+    /// </summary>
+    private void AppendSphereEdges(XYZ center, double radius, Color color)
+    {
+        const int segs = 48;
+        byte r = color.Red, g = color.Green, b = color.Blue;
+
+        for (int i = 0; i < segs; i++)
+        {
+            double a0 = 2.0 * Math.PI * i / segs;
+            double a1 = 2.0 * Math.PI * (i + 1) / segs;
+
+            // XY plane (equator)
+            _lines.Add((
+                center + new XYZ(Math.Cos(a0) * radius, Math.Sin(a0) * radius, 0),
+                center + new XYZ(Math.Cos(a1) * radius, Math.Sin(a1) * radius, 0),
+                r, g, b));
+            // XZ plane
+            _lines.Add((
+                center + new XYZ(Math.Cos(a0) * radius, 0, Math.Sin(a0) * radius),
+                center + new XYZ(Math.Cos(a1) * radius, 0, Math.Sin(a1) * radius),
+                r, g, b));
+            // YZ plane
+            _lines.Add((
+                center + new XYZ(0, Math.Cos(a0) * radius, Math.Sin(a0) * radius),
+                center + new XYZ(0, Math.Cos(a1) * radius, Math.Sin(a1) * radius),
+                r, g, b));
         }
     }
 
